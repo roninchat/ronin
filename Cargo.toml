@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "crates/ronin",
+    "crates/ronin_app",
     "crates/ronin_core",
     "crates/ronin_db",
 ]
