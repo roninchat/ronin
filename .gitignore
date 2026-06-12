@@ -1,0 +1,48 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Local editor/IDE state
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Personal Context
+context
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Ronin local runtime data
+.ronin/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs and crash dumps
+*.log
+logs/
+*.pid
+core
+core.*
+
+# Linux/package build artifacts
+*.deb
+*.rpm
+*.AppImage
+*.tar.gz
+*.zip
+
+# OS/filesystem noise
+.DS_Store
+Thumbs.db
