@@ -29,6 +29,27 @@ pub enum ProviderStatus {
     NotConfigured,
 }
 
+/// M0 design checkpoint values shown to reviewers before deeper UI work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisualDirection {
+    /// Visual qualities used to judge the running shell.
+    pub assessment_axes: &'static [&'static str],
+    /// Concrete visual changes required before deeper UI work proceeds.
+    pub required_changes_before_deeper_ui: &'static [&'static str],
+    /// Decision about whether Ronin copied/adapted Zed UI code for M0.
+    pub reuse_decision: VisualReuseDecision,
+}
+
+/// Source/reuse decision for M0 shell visuals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisualReuseDecision {
+    /// M0 uses custom GPUI layout/styling instead of copied Zed UI code.
+    CustomGpui {
+        /// Reason selected Zed UI code was not copied or adapted.
+        reason: &'static str,
+    },
+}
+
 /// Snapshot of state rendered by the native shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellState {
@@ -49,6 +70,17 @@ pub struct RoninShell {
 }
 
 impl RoninShell {
+    /// Returns the M0 visual direction checkpoint for human review.
+    pub fn m0_visual_direction() -> VisualDirection {
+        VisualDirection {
+            assessment_axes: &["rounded", "soft", "premium", "Linux-native", "Zed-grade"],
+            required_changes_before_deeper_ui: &[],
+            reuse_decision: VisualReuseDecision::CustomGpui {
+                reason: "Zed UI extraction is unnecessary for the M0 shell; Ronin needs a small custom GPUI layout before deeper chat and markdown polish.",
+            },
+        }
+    }
+
     /// Opens the shell state from persisted Ronin paths.
     pub fn open(paths: RoninPaths) -> Result<Self> {
         let session = RoninSession::open(paths)?;

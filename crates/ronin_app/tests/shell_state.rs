@@ -1,4 +1,4 @@
-use ronin_app::{ProviderStatus, RoninShell};
+use ronin_app::{ProviderStatus, RoninShell, VisualReuseDecision};
 use ronin_core::{RoninPaths, RoninSession};
 use tempfile::TempDir;
 
@@ -90,4 +90,19 @@ fn shell_should_restore_persisted_threads_and_select_first_thread() {
         Some(state.threads[0].id.as_str())
     );
     assert_eq!(state.provider_status, ProviderStatus::NotConfigured);
+}
+
+#[test]
+fn shell_should_expose_m0_visual_direction_for_design_checkpoint() {
+    let direction = RoninShell::m0_visual_direction();
+
+    assert_eq!(
+        direction.assessment_axes,
+        ["rounded", "soft", "premium", "Linux-native", "Zed-grade"]
+    );
+    assert!(direction.required_changes_before_deeper_ui.is_empty());
+    assert!(matches!(
+        direction.reuse_decision,
+        VisualReuseDecision::CustomGpui { .. }
+    ));
 }
