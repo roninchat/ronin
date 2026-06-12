@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "crates/ronin_core",
+    "crates/ronin_db",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0"
+
+[workspace.dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+tempfile = "3.10"
+thiserror = "2.0"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1.10", features = ["v7"] }
