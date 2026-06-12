@@ -46,6 +46,35 @@ fn shell_should_create_and_select_new_thread_from_sidebar_action() {
 }
 
 #[test]
+fn shell_should_create_and_select_new_empty_thread_on_new_launch() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+    let session = RoninSession::open(paths.clone()).expect("open setup session");
+    let existing = session.create_thread().expect("create existing thread");
+    drop(session);
+
+    let shell = RoninShell::open_with_new_thread(paths).expect("open shell with new thread");
+    let state = shell.state();
+    let selected_id = state
+        .selected_thread_id
+        .as_deref()
+        .expect("selected thread id");
+    let selected = state
+        .threads
+        .iter()
+        .find(|thread| thread.id == selected_id)
+        .expect("selected thread exists");
+
+    assert_eq!(state.threads.len(), 2);
+    assert!(state.threads.iter().any(|thread| thread == &existing));
+    assert_ne!(selected.id, existing.id);
+    assert_eq!(selected.title, "New Chat");
+}
+
+#[test]
 fn shell_should_select_thread_from_sidebar_action() {
     let temp = TempDir::new().expect("temp dir");
     let paths = RoninPaths {

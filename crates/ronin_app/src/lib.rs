@@ -92,7 +92,30 @@ impl RoninShell {
         let selected_thread_id = threads.first().map(|thread| thread.id.clone());
         tracing::info!(thread_count = threads.len(), "ronin shell state restored");
 
-        Ok(Self {
+        Ok(Self::from_session(session, threads, selected_thread_id))
+    }
+
+    /// Opens the shell with a newly created empty thread selected.
+    pub fn open_with_new_thread(paths: RoninPaths) -> Result<Self> {
+        let session = RoninSession::open(paths)?;
+        let mut threads = session.list_threads()?;
+        let thread = session.create_thread()?;
+        let selected_thread_id = Some(thread.id.clone());
+        threads.push(thread);
+        tracing::info!(
+            thread_count = threads.len(),
+            "ronin shell opened with new thread selected"
+        );
+
+        Ok(Self::from_session(session, threads, selected_thread_id))
+    }
+
+    fn from_session(
+        session: RoninSession,
+        threads: Vec<Thread>,
+        selected_thread_id: Option<String>,
+    ) -> Self {
+        Self {
             session,
             state: ShellState {
                 window_title: "Ronin".to_string(),
@@ -100,7 +123,7 @@ impl RoninShell {
                 selected_thread_id,
                 provider_status: ProviderStatus::NotConfigured,
             },
-        })
+        }
     }
 
     /// Creates a new thread from the sidebar action and selects it.
