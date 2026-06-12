@@ -254,19 +254,21 @@ struct M0Theme {
 impl M0Theme {
     fn dark() -> Self {
         Self {
-            app_background: rgb(0x0d1117).into(),
-            sidebar_background: rgb(0x111827).into(),
-            surface_muted: rgb(0x1f2937).into(),
-            surface_hover: rgb(0x2a3647).into(),
-            surface_selected: rgb(0x243145).into(),
-            composer_background: rgb(0x151b23).into(),
-            border_subtle: rgb(0x263241).into(),
-            border_strong: rgb(0x3b4656).into(),
-            text_primary: rgb(0xe5e7eb).into(),
-            text_muted: rgb(0x9ca3af).into(),
-            accent: rgb(0x7c3aed).into(),
-            accent_hover: rgb(0x8b5cf6).into(),
-            accent_text: rgb(0xffffff).into(),
+            // Catppuccin Mocha
+            // https://catppuccin.com/palette
+            app_background: rgb(0x1e1e2e).into(),      // base
+            sidebar_background: rgb(0x181825).into(),  // mantle
+            surface_muted: rgb(0x313244).into(),       // surface0
+            surface_hover: rgb(0x45475a).into(),       // surface1
+            surface_selected: rgb(0x585b70).into(),    // surface2
+            composer_background: rgb(0x11111b).into(), // crust
+            border_subtle: rgb(0x313244).into(),       // surface0
+            border_strong: rgb(0x45475a).into(),       // surface1
+            text_primary: rgb(0xcdd6f4).into(),        // text
+            text_muted: rgb(0xa6adc8).into(),          // subtext0
+            accent: rgb(0xcba6f7).into(),              // mauve
+            accent_hover: rgb(0xb4befe).into(),        // lavender
+            accent_text: rgb(0x11111b).into(),         // crust
         }
     }
 }
