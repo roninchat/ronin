@@ -6,12 +6,49 @@ use std::path::PathBuf;
 
 use ronin_core::RoninPaths;
 
+/// User-requested launch behavior parsed from CLI arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchIntent {
+    /// Open Ronin with the default persisted shell state.
+    OpenPersisted,
+    /// Open Ronin with a newly created empty chat selected.
+    NewThread,
+}
+
 /// Errors returned by Ronin launcher setup.
 #[derive(Debug, thiserror::Error)]
 pub enum LauncherError {
     /// No home directory was available for fallback XDG paths.
     #[error("HOME is required when XDG directories are not set")]
     MissingHome,
+
+    /// CLI argument is not supported by the M0 launcher.
+    #[error("unsupported launch flag '{flag}'. supported flags: --new")]
+    UnsupportedFlag {
+        /// Unsupported flag supplied by the user.
+        flag: String,
+    },
+}
+
+/// Parses CLI launch intent from arguments after the binary name.
+pub fn parse_launch_intent(
+    args: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<LaunchIntent, LauncherError> {
+    let mut intent = LaunchIntent::OpenPersisted;
+    for arg in args {
+        let arg = arg.as_ref();
+        match arg {
+            "--new" => intent = LaunchIntent::NewThread,
+            flag => {
+                return Err(LauncherError::UnsupportedFlag {
+                    flag: flag.to_string(),
+                });
+            }
+        }
+    }
+
+    tracing::info!(intent = ?intent, "ronin launch intent parsed");
+    Ok(intent)
 }
 
 /// Builds Ronin config/data paths from XDG environment values.

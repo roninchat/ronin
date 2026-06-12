@@ -4,7 +4,7 @@ use gpui::{
     div, prelude::*, px, rgb, size, App, Application, Bounds, Context, MouseButton, SharedString,
     TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
-use ronin::{ronin_paths, LauncherError};
+use ronin::{parse_launch_intent, ronin_paths, LaunchIntent, LauncherError};
 use ronin_app::{ProviderStatus, RoninAppError, RoninShell};
 
 fn main() -> ExitCode {
@@ -18,8 +18,13 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), RunError> {
-    let shell = RoninShell::open(ronin_paths()?)?;
-    tracing::info!("ronin native shell starting");
+    let intent = parse_launch_intent(std::env::args().skip(1))?;
+    let paths = ronin_paths()?;
+    let shell = match intent {
+        LaunchIntent::OpenPersisted => RoninShell::open(paths)?,
+        LaunchIntent::NewThread => RoninShell::open_with_new_thread(paths)?,
+    };
+    tracing::info!(intent = ?intent, "ronin native shell starting");
 
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1120.0), px(760.0)), cx);
