@@ -13,7 +13,10 @@ use uuid::Uuid;
 
 static TRACING_INIT: Once = Once::new();
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/0001_initial.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/0001_initial.sql")),
+    (2, include_str!("../migrations/0002_artifacts_memories_attachments.sql")),
+];
 
 /// Result type returned by `ronin_db` operations.
 pub type Result<T> = std::result::Result<T, RoninDbError>;
@@ -128,6 +131,46 @@ pub enum RoninDbError {
         #[source]
         source: rusqlite::Error,
     },
+
+    /// An artifact operation failed.
+    /// An artifact operation failed during creation.
+    #[error("failed to create artifact")]
+    CreateArtifact(#[source] rusqlite::Error),
+    /// An artifact could not be fetched.
+    #[error("failed to get artifact")]
+    GetArtifact(#[source] rusqlite::Error),
+    /// Artifacts could not be listed.
+    #[error("failed to list artifacts")]
+    ListArtifacts(#[source] rusqlite::Error),
+    /// An artifact could not be deleted.
+    #[error("failed to delete artifact")]
+    DeleteArtifact(#[source] rusqlite::Error),
+
+    /// A memory operation failed during creation.
+    #[error("failed to create memory")]
+    CreateMemory(#[source] rusqlite::Error),
+    /// A memory could not be fetched.
+    #[error("failed to get memory")]
+    GetMemory(#[source] rusqlite::Error),
+    /// Memories could not be listed.
+    #[error("failed to list memories")]
+    ListMemories(#[source] rusqlite::Error),
+    /// A memory could not be deleted.
+    #[error("failed to delete memory")]
+    DeleteMemory(#[source] rusqlite::Error),
+
+    /// An attachment operation failed during creation.
+    #[error("failed to create attachment")]
+    CreateAttachment(#[source] rusqlite::Error),
+    /// An attachment could not be fetched.
+    #[error("failed to get attachment")]
+    GetAttachment(#[source] rusqlite::Error),
+    /// Attachments could not be listed.
+    #[error("failed to list attachments")]
+    ListAttachments(#[source] rusqlite::Error),
+    /// An attachment could not be deleted.
+    #[error("failed to delete attachment")]
+    DeleteAttachment(#[source] rusqlite::Error),
 }
 
 /// Persisted message row returned by `ronin_db`.
@@ -162,6 +205,59 @@ pub struct DbThread {
     pub updated_at: i64,
     /// Whether the thread is archived.
     pub archived: bool,
+}
+
+/// Persisted artifact row returned by `ronin_db`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbArtifact {
+    /// App-generated opaque artifact identifier stored as SQLite `TEXT`.
+    pub id: String,
+    /// Owning thread identifier.
+    pub thread_id: String,
+    /// Originating message identifier.
+    pub message_id: String,
+    /// Artifact title.
+    pub title: String,
+    /// Artifact content.
+    pub content: String,
+    /// Creation timestamp as UTC Unix milliseconds.
+    pub created_at: i64,
+}
+
+/// Persisted memory row returned by `ronin_db`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbMemory {
+    /// App-generated opaque memory identifier stored as SQLite `TEXT`.
+    pub id: String,
+    /// Memory title.
+    pub title: String,
+    /// Memory content.
+    pub content: String,
+    /// Creation timestamp as UTC Unix milliseconds.
+    pub created_at: i64,
+    /// Last update timestamp as UTC Unix milliseconds.
+    pub updated_at: i64,
+}
+
+/// Persisted attachment row returned by `ronin_db`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbAttachment {
+    /// App-generated opaque attachment identifier stored as SQLite `TEXT`.
+    pub id: String,
+    /// Owning message identifier.
+    pub message_id: String,
+    /// Attachment kind (`file` or `clipboard`).
+    pub kind: String,
+    /// Attachment filename or paste name.
+    pub name: String,
+    /// MIME type of the attachment.
+    pub mime_type: String,
+    /// Text content for clipboard attachments.
+    pub content: Option<String>,
+    /// Path for file attachments.
+    pub path: Option<String>,
+    /// Creation timestamp as UTC Unix milliseconds.
+    pub created_at: i64,
 }
 
 /// SQLite-backed Ronin persistence handle.
@@ -399,6 +495,283 @@ impl RoninDb {
             .map_err(RoninDbError::ReadMessages)?;
 
         Ok(messages)
+    }
+
+    /// Creates and persists a new artifact.
+    pub fn create_artifact(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        title: &str,
+        content: &str,
+    ) -> Result<DbArtifact> {
+        let now = unix_timestamp_millis();
+        let artifact = DbArtifact {
+            id: Uuid::now_v7().to_string(),
+            thread_id: thread_id.to_string(),
+            message_id: message_id.to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            created_at: now,
+        };
+
+        self.conn
+            .execute(
+                "INSERT INTO artifacts (id, thread_id, message_id, title, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    artifact.id,
+                    artifact.thread_id,
+                    artifact.message_id,
+                    artifact.title,
+                    artifact.content,
+                    artifact.created_at,
+                ],
+            )
+            .map_err(RoninDbError::CreateArtifact)?;
+
+        Ok(artifact)
+    }
+
+    /// Fetches an artifact by ID.
+    pub fn get_artifact(&self, id: &str) -> Result<Option<DbArtifact>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, thread_id, message_id, title, content, created_at FROM artifacts WHERE id = ?1")
+            .map_err(RoninDbError::GetArtifact)?;
+
+        let mut rows = stmt
+            .query(params![id])
+            .map_err(RoninDbError::GetArtifact)?;
+
+        if let Some(row) = rows.next().map_err(RoninDbError::GetArtifact)? {
+            Ok(Some(DbArtifact {
+                id: row.get(0).map_err(RoninDbError::GetArtifact)?,
+                thread_id: row.get(1).map_err(RoninDbError::GetArtifact)?,
+                message_id: row.get(2).map_err(RoninDbError::GetArtifact)?,
+                title: row.get(3).map_err(RoninDbError::GetArtifact)?,
+                content: row.get(4).map_err(RoninDbError::GetArtifact)?,
+                created_at: row.get(5).map_err(RoninDbError::GetArtifact)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Lists artifacts for a specific thread.
+    pub fn list_artifacts_for_thread(&self, thread_id: &str) -> Result<Vec<DbArtifact>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, thread_id, message_id, title, content, created_at FROM artifacts WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC")
+            .map_err(RoninDbError::ListArtifacts)?;
+
+        let artifacts = stmt
+            .query_map(params![thread_id], |row| {
+                Ok(DbArtifact {
+                    id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    message_id: row.get(2)?,
+                    title: row.get(3)?,
+                    content: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })
+            .map_err(RoninDbError::ListArtifacts)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(RoninDbError::ListArtifacts)?;
+
+        Ok(artifacts)
+    }
+
+    /// Deletes an artifact by ID.
+    pub fn delete_artifact(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM artifacts WHERE id = ?1", params![id])
+            .map_err(RoninDbError::DeleteArtifact)?;
+        Ok(())
+    }
+
+    /// Creates and persists a new memory.
+    pub fn create_memory(&self, title: &str, content: &str) -> Result<DbMemory> {
+        let now = unix_timestamp_millis();
+        let memory = DbMemory {
+            id: Uuid::now_v7().to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.conn
+            .execute(
+                "INSERT INTO memories (id, title, content, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    memory.id,
+                    memory.title,
+                    memory.content,
+                    memory.created_at,
+                    memory.updated_at,
+                ],
+            )
+            .map_err(RoninDbError::CreateMemory)?;
+
+        Ok(memory)
+    }
+
+    /// Fetches a memory by ID.
+    pub fn get_memory(&self, id: &str) -> Result<Option<DbMemory>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, title, content, created_at, updated_at FROM memories WHERE id = ?1")
+            .map_err(RoninDbError::GetMemory)?;
+
+        let mut rows = stmt.query(params![id]).map_err(RoninDbError::GetMemory)?;
+
+        if let Some(row) = rows.next().map_err(RoninDbError::GetMemory)? {
+            Ok(Some(DbMemory {
+                id: row.get(0).map_err(RoninDbError::GetMemory)?,
+                title: row.get(1).map_err(RoninDbError::GetMemory)?,
+                content: row.get(2).map_err(RoninDbError::GetMemory)?,
+                created_at: row.get(3).map_err(RoninDbError::GetMemory)?,
+                updated_at: row.get(4).map_err(RoninDbError::GetMemory)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Lists all memories.
+    pub fn list_all_memories(&self) -> Result<Vec<DbMemory>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, title, content, created_at, updated_at FROM memories ORDER BY created_at ASC, id ASC")
+            .map_err(RoninDbError::ListMemories)?;
+
+        let memories = stmt
+            .query_map([], |row| {
+                Ok(DbMemory {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    content: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })
+            .map_err(RoninDbError::ListMemories)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(RoninDbError::ListMemories)?;
+
+        Ok(memories)
+    }
+
+    /// Deletes a memory by ID.
+    pub fn delete_memory(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM memories WHERE id = ?1", params![id])
+            .map_err(RoninDbError::DeleteMemory)?;
+        Ok(())
+    }
+
+    /// Creates and persists a new attachment.
+    pub fn create_attachment(
+        &self,
+        message_id: &str,
+        kind: &str,
+        name: &str,
+        mime_type: &str,
+        content: Option<&str>,
+        path: Option<&str>,
+    ) -> Result<DbAttachment> {
+        let now = unix_timestamp_millis();
+        let attachment = DbAttachment {
+            id: Uuid::now_v7().to_string(),
+            message_id: message_id.to_string(),
+            kind: kind.to_string(),
+            name: name.to_string(),
+            mime_type: mime_type.to_string(),
+            content: content.map(String::from),
+            path: path.map(String::from),
+            created_at: now,
+        };
+
+        self.conn
+            .execute(
+                "INSERT INTO attachments (id, message_id, kind, name, mime_type, content, path, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    attachment.id,
+                    attachment.message_id,
+                    attachment.kind,
+                    attachment.name,
+                    attachment.mime_type,
+                    attachment.content,
+                    attachment.path,
+                    attachment.created_at,
+                ],
+            )
+            .map_err(RoninDbError::CreateAttachment)?;
+
+        Ok(attachment)
+    }
+
+    /// Fetches an attachment by ID.
+    pub fn get_attachment(&self, id: &str) -> Result<Option<DbAttachment>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, message_id, kind, name, mime_type, content, path, created_at FROM attachments WHERE id = ?1")
+            .map_err(RoninDbError::GetAttachment)?;
+
+        let mut rows = stmt
+            .query(params![id])
+            .map_err(RoninDbError::GetAttachment)?;
+
+        if let Some(row) = rows.next().map_err(RoninDbError::GetAttachment)? {
+            Ok(Some(DbAttachment {
+                id: row.get(0).map_err(RoninDbError::GetAttachment)?,
+                message_id: row.get(1).map_err(RoninDbError::GetAttachment)?,
+                kind: row.get(2).map_err(RoninDbError::GetAttachment)?,
+                name: row.get(3).map_err(RoninDbError::GetAttachment)?,
+                mime_type: row.get(4).map_err(RoninDbError::GetAttachment)?,
+                content: row.get(5).map_err(RoninDbError::GetAttachment)?,
+                path: row.get(6).map_err(RoninDbError::GetAttachment)?,
+                created_at: row.get(7).map_err(RoninDbError::GetAttachment)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Lists attachments for a specific message.
+    pub fn list_attachments_for_message(&self, message_id: &str) -> Result<Vec<DbAttachment>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, message_id, kind, name, mime_type, content, path, created_at FROM attachments WHERE message_id = ?1 ORDER BY created_at ASC, id ASC")
+            .map_err(RoninDbError::ListAttachments)?;
+
+        let attachments = stmt
+            .query_map(params![message_id], |row| {
+                Ok(DbAttachment {
+                    id: row.get(0)?,
+                    message_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    name: row.get(3)?,
+                    mime_type: row.get(4)?,
+                    content: row.get(5)?,
+                    path: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })
+            .map_err(RoninDbError::ListAttachments)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(RoninDbError::ListAttachments)?;
+
+        Ok(attachments)
+    }
+
+    /// Deletes an attachment by ID.
+    pub fn delete_attachment(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM attachments WHERE id = ?1", params![id])
+            .map_err(RoninDbError::DeleteAttachment)?;
+        Ok(())
     }
 
     fn apply_migrations(&self) -> Result<()> {
