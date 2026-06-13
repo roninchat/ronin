@@ -334,6 +334,73 @@ impl RoninDb {
         Ok(())
     }
 
+    /// Updates a message's status and error message without changing its content.
+    pub fn update_message_status(
+        &self,
+        id: &str,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE messages SET status = ?1, error_message = ?2 WHERE id = ?3",
+                params![status, error_message, id],
+            )
+            .map_err(|source| RoninDbError::UpdateMessage {
+                id: id.to_string(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// Replaces a message's content, status, and error message.
+    pub fn update_message_content_and_status(
+        &self,
+        id: &str,
+        content: &str,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE messages SET content = ?1, status = ?2, error_message = ?3 WHERE id = ?4",
+                params![content, status, error_message, id],
+            )
+            .map_err(|source| RoninDbError::UpdateMessage {
+                id: id.to_string(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// Finds all messages that are stuck in the 'streaming' status.
+    pub fn find_stale_streaming_messages(&self) -> Result<Vec<DbMessage>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, thread_id, role, content, created_at, status, error_message FROM messages WHERE status = 'streaming' ORDER BY created_at ASC, id ASC",
+            )
+            .map_err(RoninDbError::PrepareMessageList)?;
+
+        let messages = stmt
+            .query_map([], |row| {
+                Ok(DbMessage {
+                    id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    role: row.get(2)?,
+                    content: row.get(3)?,
+                    created_at: row.get(4)?,
+                    status: row.get(5)?,
+                    error_message: row.get(6)?,
+                })
+            })
+            .map_err(RoninDbError::QueryMessages)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(RoninDbError::ReadMessages)?;
+
+        Ok(messages)
+    }
+
     fn apply_migrations(&self) -> Result<()> {
         self.conn
             .execute_batch(
