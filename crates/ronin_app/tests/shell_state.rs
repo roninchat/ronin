@@ -224,8 +224,8 @@ fn shell_should_restore_previously_selected_model_from_config() {
             health: OllamaHealth::Online,
             models: vec!["llama3.2".into(), "codellama".into()],
         };
-        let mut shell = RoninShell::open_with_ollama_provider(paths.clone(), provider)
-            .expect("first open");
+        let mut shell =
+            RoninShell::open_with_ollama_provider(paths.clone(), provider).expect("first open");
         let state = shell.state();
         assert_eq!(
             state.provider_status,
@@ -244,8 +244,7 @@ fn shell_should_restore_previously_selected_model_from_config() {
             health: OllamaHealth::Online,
             models: vec!["llama3.2".into(), "codellama".into()],
         };
-        let shell = RoninShell::open_with_ollama_provider(paths, provider)
-            .expect("re-open");
+        let shell = RoninShell::open_with_ollama_provider(paths, provider).expect("re-open");
         let state = shell.state();
         assert_eq!(
             state.provider_status,

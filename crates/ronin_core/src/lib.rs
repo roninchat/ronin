@@ -7,7 +7,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ronin_db::{init_tracing, DbThread, RoninDb, RoninDbError};
+use ronin_db::{init_tracing, DbMessage, DbThread, RoninDb, RoninDbError};
 
 /// Result type returned by `ronin_core` operations.
 pub type Result<T> = std::result::Result<T, RoninError>;
@@ -29,6 +29,56 @@ pub trait OllamaProvider {
     fn list_models(&self) -> Result<Vec<String>>;
 }
 
+/// A request to send to a chat provider.
+#[derive(Debug, Clone)]
+pub struct ChatRequest {
+    /// Model name to use for this request.
+    pub model: String,
+    /// Conversation messages to include as context.
+    pub messages: Vec<ChatMessage>,
+    /// Optional system prompt prepended to the request (not persisted).
+    pub system_prompt: Option<String>,
+}
+
+/// A message in a chat request (role + content pairs).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChatMessage {
+    /// Message role for the provider.
+    pub role: String,
+    /// Message content.
+    pub content: String,
+}
+
+/// An event emitted during a streaming chat response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatStreamEvent {
+    /// A partial chunk of the assistant response.
+    Chunk(String),
+    /// The stream encountered an error.
+    Error(String),
+}
+
+/// Provider boundary for streaming chat requests.
+pub trait ChatProvider {
+    /// Initiates a streaming chat request.
+    ///
+    /// Returns an iterator of stream events. Callers should drain the iterator
+    /// to receive all chunks, then finalize the response.
+    fn stream_chat(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<Box<dyn Iterator<Item = ChatStreamEvent> + '_>>;
+}
+
+/// System prompt describing Ronin's capability boundary.
+pub const RONIN_SYSTEM_PROMPT: &str = "\
+You are Ronin, a local AI assistant running on Linux. \
+You run offline via Ollama and have no internet access. \
+You cannot browse the web, fetch URLs, run shell commands, \
+or access files on the user's system unless they paste content \
+into the chat. Answer concisely and truthfully. \
+When you don't know something, say so.";
+
 /// HTTP-based Ollama provider that queries the Ollama REST API.
 pub struct HttpOllamaProvider {
     base_url: String,
@@ -40,6 +90,112 @@ impl HttpOllamaProvider {
         Self {
             base_url: base_url.into(),
         }
+    }
+}
+
+impl ChatProvider for HttpOllamaProvider {
+    fn stream_chat(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<Box<dyn Iterator<Item = ChatStreamEvent> + '_>> {
+        #[derive(serde::Serialize)]
+        struct OllamaChatRequest<'a> {
+            model: &'a str,
+            messages: &'a [ChatMessage],
+            stream: bool,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct OllamaChatResponse {
+            message: Option<OllamaChatMessage>,
+            done: Option<bool>,
+            error: Option<String>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct OllamaChatMessage {
+            content: String,
+        }
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| RoninError::Provider(e.to_string()))?;
+
+        let body = OllamaChatRequest {
+            model: &request.model,
+            messages: &request.messages,
+            stream: true,
+        };
+
+        let resp = client
+            .post(format!("{}/api/chat", self.base_url))
+            .json(&body)
+            .send()
+            .map_err(|e| RoninError::Provider(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let resp_text = resp
+                .text()
+                .map_err(|e| RoninError::Provider(e.to_string()))?;
+            return Err(RoninError::Provider(format!(
+                "ollama returned {status}: {resp_text}"
+            )));
+        }
+
+        // Spawn a thread to read the response body line-by-line (true streaming)
+        // and send parsed chunks through a channel. The returned iterator reads
+        // from the channel receiver, blocking only until the next chunk arrives.
+        let (tx, rx) = std::sync::mpsc::channel::<ChatStreamEvent>();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(resp);
+            for line_result in reader.lines() {
+                let line = match line_result {
+                    Ok(l) => l,
+                    Err(e) => {
+                        let _ = tx.send(ChatStreamEvent::Error(format!(
+                            "failed to read response: {e}"
+                        )));
+                        return;
+                    }
+                };
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<OllamaChatResponse>(line) {
+                    Ok(msg) => {
+                        if let Some(error) = msg.error {
+                            let _ = tx.send(ChatStreamEvent::Error(error));
+                            return;
+                        }
+                        if let Some(message) = msg.message {
+                            let content = message.content;
+                            if !content.is_empty()
+                                && tx.send(ChatStreamEvent::Chunk(content)).is_err()
+                            {
+                                return; // Receiver dropped
+                            }
+                        }
+                        if msg.done == Some(true) {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(ChatStreamEvent::Error(format!(
+                            "failed to parse ollama response: {e}"
+                        )));
+                        return;
+                    }
+                }
+            }
+            // If we get here, the stream ended without a `done: true` marker.
+            // This is fine — the loop simply ends.
+        });
+
+        Ok(Box::new(rx.into_iter()))
     }
 }
 
@@ -146,6 +302,47 @@ pub struct Thread {
     pub archived: bool,
 }
 
+/// Role of a chat message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageRole {
+    /// Message sent by the user.
+    User,
+    /// Response generated by the assistant.
+    Assistant,
+    /// System-level instruction (not persisted).
+    System,
+}
+
+/// Lifecycle status of an assistant message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageStatus {
+    /// Message is fully written and complete.
+    Complete,
+    /// Message is being generated; content may be partial.
+    Streaming,
+    /// Generation failed or was cancelled.
+    Error,
+}
+
+/// A chat message within a thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    /// App-generated opaque message identifier.
+    pub id: String,
+    /// Owning thread identifier.
+    pub thread_id: String,
+    /// Message role.
+    pub role: MessageRole,
+    /// Message body content.
+    pub content: String,
+    /// Creation timestamp as UTC Unix milliseconds.
+    pub created_at: i64,
+    /// Lifecycle status.
+    pub status: MessageStatus,
+    /// Sanitized failure reason when status is `Error`.
+    pub error_message: Option<String>,
+}
+
 /// Open Ronin application session backed by local filesystem state.
 pub struct RoninSession {
     db: RoninDb,
@@ -192,6 +389,54 @@ impl RoninSession {
             .map_err(Into::into)
     }
 
+    /// Updates a thread's title and bumps its updated_at timestamp.
+    pub fn update_thread_title(&self, thread_id: &str, title: &str) -> Result<()> {
+        self.db
+            .update_thread_title(thread_id, title)
+            .map_err(Into::into)
+    }
+
+    /// Creates and persists a new message in the given thread.
+    pub fn create_message(
+        &self,
+        thread_id: &str,
+        role: MessageRole,
+        content: &str,
+    ) -> Result<Message> {
+        let db_role = match role {
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::System => "system",
+        };
+        self.db
+            .create_message(thread_id, db_role, content, "complete")
+            .map(Message::from)
+            .map_err(Into::into)
+    }
+
+    /// Creates and persists a streaming assistant message placeholder.
+    pub fn create_streaming_message(&self, thread_id: &str, content: &str) -> Result<Message> {
+        self.db
+            .create_message(thread_id, "assistant", content, "streaming")
+            .map(Message::from)
+            .map_err(Into::into)
+    }
+
+    /// Lists messages for a thread in creation order.
+    pub fn list_messages(&self, thread_id: &str) -> Result<Vec<Message>> {
+        self.db
+            .list_messages_for_thread(thread_id)
+            .map(|msgs| msgs.into_iter().map(Message::from).collect())
+            .map_err(Into::into)
+    }
+
+    /// Replaces an assistant message's content and sets status to complete.
+    pub fn complete_message(&self, message_id: &str, content: &str) -> Result<()> {
+        self.db
+            .update_message_content(message_id, content, "complete")
+            .map_err(Into::into)
+    }
+
     /// Loads the previously selected Ollama model from config, if any.
     pub fn load_selected_model(&self) -> Result<Option<String>> {
         let config_path = self.paths.config_dir.join("ronin_config.json");
@@ -207,6 +452,14 @@ impl RoninSession {
         let config: Config = serde_json::from_str(&data)
             .map_err(|e| RoninError::Config(format!("parse config: {e}")))?;
         Ok(config.selected_model)
+    }
+
+    /// Creates an independent session handle pointing at the same database.
+    ///
+    /// Opens a separate SQLite connection so the caller can write from a
+    /// background thread without blocking the main session.
+    pub fn clone_session(&self) -> Result<Self> {
+        Self::open(self.paths.clone())
     }
 
     /// Saves the selected Ollama model to config.
@@ -236,6 +489,28 @@ impl From<DbThread> for Thread {
             created_at: thread.created_at,
             updated_at: thread.updated_at,
             archived: thread.archived,
+        }
+    }
+}
+
+impl From<DbMessage> for Message {
+    fn from(msg: DbMessage) -> Self {
+        Self {
+            id: msg.id,
+            thread_id: msg.thread_id,
+            role: match msg.role.as_str() {
+                "user" => MessageRole::User,
+                "assistant" => MessageRole::Assistant,
+                _ => MessageRole::System,
+            },
+            content: msg.content,
+            created_at: msg.created_at,
+            status: match msg.status.as_str() {
+                "streaming" => MessageStatus::Streaming,
+                "error" => MessageStatus::Error,
+                _ => MessageStatus::Complete,
+            },
+            error_message: msg.error_message,
         }
     }
 }
