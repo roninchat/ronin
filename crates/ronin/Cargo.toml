@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 gpui = "0.2.2"
+pulldown-cmark = "0.13.4"
 ronin_app = { path = "../ronin_app" }
 ronin_core = { path = "../ronin_core" }
 thiserror.workspace = true
