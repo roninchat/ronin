@@ -39,6 +39,32 @@ pub enum RoninDbError {
     #[error("failed to create thread")]
     CreateThread(#[source] rusqlite::Error),
 
+    /// A message insert failed.
+    #[error("failed to create message")]
+    CreateMessage(#[source] rusqlite::Error),
+
+    /// Preparing the message list query failed.
+    #[error("failed to prepare message list query")]
+    PrepareMessageList(#[source] rusqlite::Error),
+
+    /// Querying rows for the message list failed.
+    #[error("failed to query messages")]
+    QueryMessages(#[source] rusqlite::Error),
+
+    /// Reading one or more message rows failed.
+    #[error("failed to read messages")]
+    ReadMessages(#[source] rusqlite::Error),
+
+    /// Updating a message failed.
+    #[error("failed to update message {id}")]
+    UpdateMessage {
+        /// Message id being updated.
+        id: String,
+        /// Underlying SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
+
     /// Preparing the thread list query failed.
     #[error("failed to prepare thread list query")]
     PrepareThreadList(#[source] rusqlite::Error),
@@ -50,6 +76,16 @@ pub enum RoninDbError {
     /// Reading one or more thread rows failed.
     #[error("failed to read threads")]
     ReadThreads(#[source] rusqlite::Error),
+
+    /// Updating a thread title failed.
+    #[error("failed to update thread {id}")]
+    UpdateThread {
+        /// Thread id being updated.
+        id: String,
+        /// Underlying SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
 
     /// Creating the migration bookkeeping table failed.
     #[error("failed to create schema_migrations table")]
@@ -92,6 +128,25 @@ pub enum RoninDbError {
         #[source]
         source: rusqlite::Error,
     },
+}
+
+/// Persisted message row returned by `ronin_db`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbMessage {
+    /// App-generated opaque message identifier stored as SQLite `TEXT`.
+    pub id: String,
+    /// Owning thread identifier.
+    pub thread_id: String,
+    /// Message role (`user`, `assistant`, or `system`).
+    pub role: String,
+    /// Message body content.
+    pub content: String,
+    /// Creation timestamp as UTC Unix milliseconds.
+    pub created_at: i64,
+    /// Message lifecycle status (`complete`, `streaming`, or `error`).
+    pub status: String,
+    /// Sanitized failure reason when status is `error`.
+    pub error_message: Option<String>,
 }
 
 /// Persisted thread row returned by `ronin_db`.
@@ -160,6 +215,21 @@ impl RoninDb {
         Ok(thread)
     }
 
+    /// Updates the title of a thread and bumps its updated_at timestamp.
+    pub fn update_thread_title(&self, id: &str, title: &str) -> Result<()> {
+        let now = unix_timestamp_millis();
+        self.conn
+            .execute(
+                "UPDATE threads SET title = ?1, updated_at = ?2 WHERE id = ?3",
+                params![title, now, id],
+            )
+            .map_err(|source| RoninDbError::UpdateThread {
+                id: id.to_string(),
+                source,
+            })?;
+        Ok(())
+    }
+
     /// Lists persisted threads in stable creation order.
     pub fn list_threads(&self) -> Result<Vec<DbThread>> {
         let mut stmt = self
@@ -184,6 +254,84 @@ impl RoninDb {
             .map_err(RoninDbError::ReadThreads)?;
 
         Ok(threads)
+    }
+
+    /// Creates and persists a new message in the given thread.
+    pub fn create_message(
+        &self,
+        thread_id: &str,
+        role: &str,
+        content: &str,
+        status: &str,
+    ) -> Result<DbMessage> {
+        let now = unix_timestamp_millis();
+        let message = DbMessage {
+            id: Uuid::now_v7().to_string(),
+            thread_id: thread_id.to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            created_at: now,
+            status: status.to_string(),
+            error_message: None,
+        };
+
+        self.conn
+            .execute(
+                "INSERT INTO messages (id, thread_id, role, content, created_at, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    message.id,
+                    message.thread_id,
+                    message.role,
+                    message.content,
+                    message.created_at,
+                    message.status,
+                ],
+            )
+            .map_err(RoninDbError::CreateMessage)?;
+
+        Ok(message)
+    }
+
+    /// Lists messages for a thread in creation order.
+    pub fn list_messages_for_thread(&self, thread_id: &str) -> Result<Vec<DbMessage>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, thread_id, role, content, created_at, status, error_message FROM messages WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
+            )
+            .map_err(RoninDbError::PrepareMessageList)?;
+
+        let messages = stmt
+            .query_map(params![thread_id], |row| {
+                Ok(DbMessage {
+                    id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    role: row.get(2)?,
+                    content: row.get(3)?,
+                    created_at: row.get(4)?,
+                    status: row.get(5)?,
+                    error_message: row.get(6)?,
+                })
+            })
+            .map_err(RoninDbError::QueryMessages)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(RoninDbError::ReadMessages)?;
+
+        Ok(messages)
+    }
+
+    /// Replaces a message's content and status (for streaming completion).
+    pub fn update_message_content(&self, id: &str, content: &str, status: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE messages SET content = ?1, status = ?2 WHERE id = ?3",
+                params![content, status, id],
+            )
+            .map_err(|source| RoninDbError::UpdateMessage {
+                id: id.to_string(),
+                source,
+            })?;
+        Ok(())
     }
 
     fn apply_migrations(&self) -> Result<()> {

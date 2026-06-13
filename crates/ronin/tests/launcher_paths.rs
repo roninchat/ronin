@@ -32,8 +32,9 @@ fn ronin_should_exit_nonzero_when_unsupported_flag_is_passed() {
         .expect("run ronin with unsupported flag");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("unsupported launch flag '--unknown'. supported flags: --new, --provider ollama"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains(
+        "unsupported launch flag '--unknown'. supported flags: --new, --provider ollama"
+    ));
 }
 
 #[test]
