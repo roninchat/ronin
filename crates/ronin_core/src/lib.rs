@@ -7,7 +7,9 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ronin_db::{init_tracing, DbMessage, DbThread, RoninDb, RoninDbError};
+use ronin_db::{
+    init_tracing, DbArtifact, DbAttachment, DbMemory, DbMessage, DbThread, RoninDb, RoninDbError,
+};
 
 /// Result type returned by `ronin_core` operations.
 pub type Result<T> = std::result::Result<T, RoninError>;
@@ -347,6 +349,80 @@ pub struct Message {
     pub error_message: Option<String>,
 }
 
+/// Opaque identifier for an Artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactId(pub String);
+
+/// Opaque identifier for a Memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryId(pub String);
+
+/// Opaque identifier for an Attachment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentId(pub String);
+
+/// Kind of an attachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentKind {
+    /// A file path attachment.
+    File,
+    /// A pasted clipboard attachment.
+    Clipboard,
+}
+
+/// A persisted artifact linked to a specific message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Artifact {
+    /// App-generated opaque artifact identifier.
+    pub id: ArtifactId,
+    /// Owning thread identifier.
+    pub thread_id: String,
+    /// Originating message identifier.
+    pub message_id: String,
+    /// Artifact title.
+    pub title: String,
+    /// Artifact content.
+    pub content: String,
+    /// Creation timestamp as UTC Unix milliseconds.
+    pub created_at: i64,
+}
+
+/// A persisted core memory piece.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Memory {
+    /// App-generated opaque memory identifier.
+    pub id: MemoryId,
+    /// Memory title.
+    pub title: String,
+    /// Memory content.
+    pub content: String,
+    /// Creation timestamp as UTC Unix milliseconds.
+    pub created_at: i64,
+    /// Last update timestamp as UTC Unix milliseconds.
+    pub updated_at: i64,
+}
+
+/// A persisted attachment linked to a specific message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    /// App-generated opaque attachment identifier.
+    pub id: AttachmentId,
+    /// Owning message identifier.
+    pub message_id: String,
+    /// Kind of attachment.
+    pub kind: AttachmentKind,
+    /// Attachment filename or paste name.
+    pub name: String,
+    /// MIME type of the attachment.
+    pub mime_type: String,
+    /// Text content for clipboard attachments.
+    pub content: Option<String>,
+    /// Path for file attachments.
+    pub path: Option<String>,
+    /// Creation timestamp as UTC Unix milliseconds.
+    pub created_at: i64,
+}
+
 /// Open Ronin application session backed by local filesystem state.
 pub struct RoninSession {
     db: RoninDb,
@@ -512,6 +588,87 @@ impl RoninSession {
         tracing::info!(model = %model, "saved selected model to config");
         Ok(())
     }
+
+    /// Creates a new artifact.
+    pub fn create_artifact(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        title: &str,
+        content: &str,
+    ) -> Result<Artifact> {
+        self.db
+            .create_artifact(thread_id, message_id, title, content)
+            .map(Artifact::from)
+            .map_err(Into::into)
+    }
+
+    /// Lists artifacts for a thread.
+    pub fn list_artifacts(&self, thread_id: &str) -> Result<Vec<Artifact>> {
+        self.db
+            .list_artifacts_for_thread(thread_id)
+            .map(|artifacts| artifacts.into_iter().map(|a| Artifact::from(a)).collect())
+            .map_err(Into::into)
+    }
+
+    /// Deletes an artifact.
+    pub fn delete_artifact(&self, id: &ArtifactId) -> Result<()> {
+        self.db.delete_artifact(&id.0).map_err(Into::into)
+    }
+
+    /// Creates a new memory.
+    pub fn create_memory(&self, title: &str, content: &str) -> Result<Memory> {
+        self.db
+            .create_memory(title, content)
+            .map(Memory::from)
+            .map_err(Into::into)
+    }
+
+    /// Lists all memories.
+    pub fn list_memories(&self) -> Result<Vec<Memory>> {
+        self.db
+            .list_all_memories()
+            .map(|memories| memories.into_iter().map(|m| Memory::from(m)).collect())
+            .map_err(Into::into)
+    }
+
+    /// Deletes a memory.
+    pub fn delete_memory(&self, id: &MemoryId) -> Result<()> {
+        self.db.delete_memory(&id.0).map_err(Into::into)
+    }
+
+    /// Creates a new attachment.
+    pub fn create_attachment(
+        &self,
+        message_id: &str,
+        kind: AttachmentKind,
+        name: &str,
+        mime_type: &str,
+        content: Option<&str>,
+        path: Option<&str>,
+    ) -> Result<Attachment> {
+        let db_kind = match kind {
+            AttachmentKind::File => "file",
+            AttachmentKind::Clipboard => "clipboard",
+        };
+        self.db
+            .create_attachment(message_id, db_kind, name, mime_type, content, path)
+            .map(Attachment::from)
+            .map_err(Into::into)
+    }
+
+    /// Lists attachments for a message.
+    pub fn list_attachments(&self, message_id: &str) -> Result<Vec<Attachment>> {
+        self.db
+            .list_attachments_for_message(message_id)
+            .map(|attachments| attachments.into_iter().map(|a| Attachment::from(a)).collect())
+            .map_err(Into::into)
+    }
+
+    /// Deletes an attachment.
+    pub fn delete_attachment(&self, id: &AttachmentId) -> Result<()> {
+        self.db.delete_attachment(&id.0).map_err(Into::into)
+    }
 }
 
 impl From<DbThread> for Thread {
@@ -546,6 +703,49 @@ impl From<DbMessage> for Message {
                 _ => MessageStatus::Complete,
             },
             error_message: msg.error_message,
+        }
+    }
+}
+
+impl From<DbArtifact> for Artifact {
+    fn from(artifact: DbArtifact) -> Self {
+        Self {
+            id: ArtifactId(artifact.id),
+            thread_id: artifact.thread_id,
+            message_id: artifact.message_id,
+            title: artifact.title,
+            content: artifact.content,
+            created_at: artifact.created_at,
+        }
+    }
+}
+
+impl From<DbMemory> for Memory {
+    fn from(memory: DbMemory) -> Self {
+        Self {
+            id: MemoryId(memory.id),
+            title: memory.title,
+            content: memory.content,
+            created_at: memory.created_at,
+            updated_at: memory.updated_at,
+        }
+    }
+}
+
+impl From<DbAttachment> for Attachment {
+    fn from(attachment: DbAttachment) -> Self {
+        Self {
+            id: AttachmentId(attachment.id),
+            message_id: attachment.message_id,
+            kind: match attachment.kind.as_str() {
+                "clipboard" => AttachmentKind::Clipboard,
+                _ => AttachmentKind::File,
+            },
+            name: attachment.name,
+            mime_type: attachment.mime_type,
+            content: attachment.content,
+            path: attachment.path,
+            created_at: attachment.created_at,
         }
     }
 }
