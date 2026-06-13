@@ -555,6 +555,37 @@ impl RoninShell {
         }
     }
 
+    /// Cancels an active streaming generation.
+    pub fn cancel_streaming(&mut self) -> Result<()> {
+        if !self.generation_active {
+            return Ok(());
+        }
+
+        if let Some(msg_id) = self.streaming_msg_id.take() {
+            let current_content = self
+                .state
+                .messages
+                .as_ref()
+                .and_then(|msgs| msgs.iter().find(|m| m.id == msg_id))
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+
+            self.session.cancel_message(&msg_id, &current_content)?;
+
+            if let Some(ref mut msgs) = self.state.messages {
+                if let Some(msg) = msgs.iter_mut().find(|m| m.id == msg_id) {
+                    msg.status = MessageStatus::Cancelled;
+                }
+            }
+
+            tracing::info!(message_id = %msg_id, "streaming response cancelled by user");
+        }
+
+        self.streaming_rx = None;
+        self.generation_active = false;
+        Ok(())
+    }
+
     /// Sends a user message and streams an assistant response via a provider.
     ///
     /// Persists the user message immediately, inserts a `streaming` assistant

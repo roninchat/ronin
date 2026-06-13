@@ -144,7 +144,11 @@ fn shell_should_set_ollama_offline_when_opened_with_ollama_provider() {
         data_dir: temp.path().join("data"),
     };
 
-    let shell = RoninShell::open_with_ollama(paths).expect("open shell with ollama");
+    let provider = FakeOllama {
+        health: ronin_core::OllamaHealth::Offline,
+        models: vec![],
+    };
+    let shell = RoninShell::open_with_ollama_provider(paths, provider).expect("open shell");
     let state = shell.state();
 
     assert_eq!(state.provider_status, ProviderStatus::OllamaOffline);

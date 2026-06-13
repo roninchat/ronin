@@ -322,6 +322,10 @@ pub enum MessageStatus {
     Streaming,
     /// Generation failed or was cancelled.
     Error,
+    /// User cancelled the generation.
+    Cancelled,
+    /// Generation was interrupted before completion (e.g. app exited).
+    Failed,
 }
 
 /// A chat message within a thread.
@@ -370,7 +374,22 @@ impl RoninSession {
         tracing::info!(data_dir = %paths.data_dir.display(), "ronin data directory ready");
 
         let db = RoninDb::open(paths.data_dir.join("ronin.db"))?;
-        Ok(Self { db, paths })
+        let session = Self { db, paths };
+        session.repair_stale_streaming_messages()?;
+        Ok(session)
+    }
+
+    fn repair_stale_streaming_messages(&self) -> Result<()> {
+        let stale_msgs = self.db.find_stale_streaming_messages()?;
+        for msg in stale_msgs {
+            tracing::info!(message_id = %msg.id, "repairing stale streaming message on startup");
+            self.db.update_message_status(
+                &msg.id,
+                "failed",
+                Some("Generation interrupted because Ronin exited before the response completed."),
+            )?;
+        }
+        Ok(())
     }
 
     /// Creates a new user-visible thread titled `New Chat` and persists it.
@@ -433,7 +452,21 @@ impl RoninSession {
     /// Replaces an assistant message's content and sets status to complete.
     pub fn complete_message(&self, message_id: &str, content: &str) -> Result<()> {
         self.db
-            .update_message_content(message_id, content, "complete")
+            .update_message_content_and_status(message_id, content, "complete", None)
+            .map_err(Into::into)
+    }
+
+    /// Cancels a streaming message, saving partial output.
+    pub fn cancel_message(&self, message_id: &str, content: &str) -> Result<()> {
+        self.db
+            .update_message_content_and_status(message_id, content, "cancelled", None)
+            .map_err(Into::into)
+    }
+
+    /// Fails a message with an error.
+    pub fn fail_message(&self, message_id: &str, content: &str, error_message: &str) -> Result<()> {
+        self.db
+            .update_message_content_and_status(message_id, content, "failed", Some(error_message))
             .map_err(Into::into)
     }
 
@@ -508,6 +541,8 @@ impl From<DbMessage> for Message {
             status: match msg.status.as_str() {
                 "streaming" => MessageStatus::Streaming,
                 "error" => MessageStatus::Error,
+                "cancelled" => MessageStatus::Cancelled,
+                "failed" => MessageStatus::Failed,
                 _ => MessageStatus::Complete,
             },
             error_message: msg.error_message,
