@@ -196,6 +196,9 @@ impl RoninWindow {
                 }
                 self.send_current_message(cx);
             }
+            "escape" => {
+                self.cancel_generation(cx);
+            }
             "backspace" => {
                 self.composer_text.pop();
                 cx.notify();
@@ -212,6 +215,58 @@ impl RoninWindow {
             }
         }
     }
+
+    fn cancel_generation(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = self.shell.cancel_streaming() {
+            tracing::error!(%e, "failed to cancel generation");
+        }
+        cx.notify();
+    }
+
+    fn on_global_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keystroke = &event.keystroke;
+
+        match keystroke.key.as_str() {
+            "n" if keystroke.modifiers.control => {
+                self.create_new_thread_shortcut(window, cx);
+            }
+            "l" | "k" if keystroke.modifiers.control => {
+                self.focus_composer_shortcut(window, cx);
+            }
+            "escape" => {
+                self.cancel_generation(cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn create_new_thread_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.shell.create_new_thread() {
+            Ok(_) => {
+                window.focus(&self.composer_focus);
+                cx.notify();
+            }
+            Err(e) => tracing::error!(%e, "failed to create new thread via shortcut"),
+        }
+    }
+
+    fn focus_composer_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.composer_focus);
+        cx.notify();
+    }
+
+    // Shortcuts whose features are not added yet
+    fn edit_message_shortcut(&mut self, _cx: &mut Context<Self>) {}
+    fn branch_message_shortcut(&mut self, _cx: &mut Context<Self>) {}
+    fn retry_generation_shortcut(&mut self, _cx: &mut Context<Self>) {}
+    fn regenerate_message_shortcut(&mut self, _cx: &mut Context<Self>) {}
+    fn delete_message_shortcut(&mut self, _cx: &mut Context<Self>) {}
+    fn archive_thread_shortcut(&mut self, _cx: &mut Context<Self>) {}
 
     fn render_sidebar(
         &self,
@@ -624,6 +679,7 @@ impl Render for RoninWindow {
             .bg(theme.app_background)
             .text_color(theme.text_primary)
             .font_family("Inter")
+            .on_key_down(cx.listener(Self::on_global_key_down))
             .child(self.render_sidebar(state, &theme, cx))
             .child(
                 div()
