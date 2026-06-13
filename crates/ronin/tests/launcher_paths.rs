@@ -8,12 +8,19 @@ fn parse_launch_intent_should_return_new_thread_when_new_flag_is_present() {
 }
 
 #[test]
+fn parse_launch_intent_should_accept_ollama_provider() {
+    let intent = parse_launch_intent(["--provider", "ollama"]).expect("parse ollama provider");
+
+    assert_eq!(intent, LaunchIntent::OpenWithOllama);
+}
+
+#[test]
 fn parse_launch_intent_should_reject_unsupported_flags() {
     let error = parse_launch_intent(["--unknown"]).expect_err("unsupported flag");
 
     assert_eq!(
         error.to_string(),
-        "unsupported launch flag '--unknown'. supported flags: --new"
+        "unsupported launch flag '--unknown'. supported flags: --new, --provider ollama"
     );
 }
 
@@ -26,7 +33,7 @@ fn ronin_should_exit_nonzero_when_unsupported_flag_is_passed() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("unsupported launch flag '--unknown'. supported flags: --new"));
+        .contains("unsupported launch flag '--unknown'. supported flags: --new, --provider ollama"));
 }
 
 #[test]

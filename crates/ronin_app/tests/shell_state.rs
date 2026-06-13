@@ -1,5 +1,5 @@
 use ronin_app::{ProviderStatus, RoninShell, VisualReuseDecision};
-use ronin_core::{RoninPaths, RoninSession};
+use ronin_core::{OllamaHealth, OllamaProvider, RoninPaths, RoninSession};
 use tempfile::TempDir;
 
 #[test]
@@ -134,4 +134,124 @@ fn shell_should_expose_m0_visual_direction_for_design_checkpoint() {
         direction.reuse_decision,
         VisualReuseDecision::CustomGpui { .. }
     ));
+}
+
+#[test]
+fn shell_should_set_ollama_offline_when_opened_with_ollama_provider() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+
+    let shell = RoninShell::open_with_ollama(paths).expect("open shell with ollama");
+    let state = shell.state();
+
+    assert_eq!(state.provider_status, ProviderStatus::OllamaOffline);
+}
+
+struct FakeOllama {
+    health: OllamaHealth,
+    models: Vec<String>,
+}
+
+impl OllamaProvider for FakeOllama {
+    fn check_health(&self) -> OllamaHealth {
+        self.health.clone()
+    }
+
+    fn list_models(&self) -> Result<Vec<String>, ronin_core::RoninError> {
+        Ok(self.models.clone())
+    }
+}
+
+#[test]
+fn shell_should_select_first_model_when_ollama_online_with_models() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+
+    let provider = FakeOllama {
+        health: OllamaHealth::Online,
+        models: vec!["llama3.2".into(), "codellama".into()],
+    };
+
+    let shell =
+        RoninShell::open_with_ollama_provider(paths, provider).expect("open shell with ollama");
+    let state = shell.state();
+
+    assert_eq!(
+        state.provider_status,
+        ProviderStatus::OllamaOnline {
+            model: "llama3.2".into()
+        }
+    );
+}
+
+#[test]
+fn shell_should_show_no_models_when_ollama_online_but_empty() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+
+    let provider = FakeOllama {
+        health: OllamaHealth::Online,
+        models: vec![],
+    };
+
+    let shell =
+        RoninShell::open_with_ollama_provider(paths, provider).expect("open shell with ollama");
+    let state = shell.state();
+
+    assert_eq!(state.provider_status, ProviderStatus::OllamaNoModels);
+}
+
+#[test]
+fn shell_should_restore_previously_selected_model_from_config() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+
+    // First open: select codellama (second model)
+    {
+        let provider = FakeOllama {
+            health: OllamaHealth::Online,
+            models: vec!["llama3.2".into(), "codellama".into()],
+        };
+        let mut shell = RoninShell::open_with_ollama_provider(paths.clone(), provider)
+            .expect("first open");
+        let state = shell.state();
+        assert_eq!(
+            state.provider_status,
+            ProviderStatus::OllamaOnline {
+                model: "llama3.2".into()
+            }
+        );
+        // Select codellama explicitly
+        shell.select_model("codellama").expect("select codellama");
+        drop(shell);
+    }
+
+    // Re-open: should restore previously selected model from config
+    {
+        let provider = FakeOllama {
+            health: OllamaHealth::Online,
+            models: vec!["llama3.2".into(), "codellama".into()],
+        };
+        let shell = RoninShell::open_with_ollama_provider(paths, provider)
+            .expect("re-open");
+        let state = shell.state();
+        assert_eq!(
+            state.provider_status,
+            ProviderStatus::OllamaOnline {
+                model: "codellama".into()
+            }
+        );
+    }
 }
