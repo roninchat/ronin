@@ -359,6 +359,105 @@ impl RoninWindow {
                 MessageRole::System => unreachable!(),
             };
 
+            let raw_content = msg.content.clone();
+
+            let mut message_body = div().w_full().flex().flex_col().gap_3();
+
+            let blocks = ronin::markdown::parse_markdown(&msg.content);
+            for block in blocks {
+                let block_el = match block {
+                    ronin::markdown::MarkdownBlock::Paragraph(inlines) => {
+                        let mut p = div().w_full().flex().flex_row().flex_wrap().gap_1();
+                        for inline in inlines {
+                            match inline {
+                                ronin::markdown::Inline::Text(text) => {
+                                    for word in text.split(' ') {
+                                        if !word.is_empty() {
+                                            p = p.child(div().child(word.to_string()));
+                                        }
+                                    }
+                                }
+                                ronin::markdown::Inline::Code(code) => {
+                                    p = p.child(
+                                        div()
+                                            .bg(theme.surface_muted)
+                                            .rounded_sm()
+                                            .px_1()
+                                            .font_family("Courier New")
+                                            .text_color(theme.accent)
+                                            .child(code),
+                                    );
+                                }
+                            }
+                        }
+                        p
+                    }
+                    ronin::markdown::MarkdownBlock::CodeBlock { language, content } => {
+                        let lang_label = language.unwrap_or_else(|| "text".to_string());
+                        let mut code_lines =
+                            div().w_full().font_family("Courier New").flex().flex_col();
+                        for line in content.split('\n') {
+                            code_lines = code_lines.child(div().w_full().child(line.to_string()));
+                        }
+                        div()
+                            .w_full()
+                            .bg(theme.surface_hover)
+                            .rounded_md()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.text_muted)
+                                    .child(lang_label),
+                            )
+                            .child(code_lines)
+                    }
+                    ronin::markdown::MarkdownBlock::List(items) => {
+                        let mut list_div = div().w_full().flex().flex_col().gap_1().pl_4();
+                        for item in items {
+                            let mut li_content = div().flex().flex_row().flex_wrap().gap_1();
+                            for inline in item.inlines {
+                                match inline {
+                                    ronin::markdown::Inline::Text(text) => {
+                                        for word in text.split(' ') {
+                                            if !word.is_empty() {
+                                                li_content =
+                                                    li_content.child(div().child(word.to_string()));
+                                            }
+                                        }
+                                    }
+                                    ronin::markdown::Inline::Code(code) => {
+                                        li_content = li_content.child(
+                                            div()
+                                                .bg(theme.surface_muted)
+                                                .rounded_sm()
+                                                .px_1()
+                                                .font_family("Courier New")
+                                                .text_color(theme.accent)
+                                                .child(code),
+                                        );
+                                    }
+                                }
+                            }
+                            list_div = list_div.child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .child(div().child("•"))
+                                    .child(li_content),
+                            );
+                        }
+                        list_div
+                    }
+                };
+                message_body = message_body.child(block_el);
+            }
+
             Some(
                 div()
                     .w_full()
@@ -367,20 +466,34 @@ impl RoninWindow {
                     .mb_4()
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme.text_muted)
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
                             .mb_1()
-                            .child(label),
+                            .child(div().text_xs().text_color(theme.text_muted).child(label))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.accent)
+                                    .cursor_pointer()
+                                    .child("Copy")
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            raw_content.clone(),
+                                        ));
+                                    }),
+                            ),
                     )
                     .child(
                         div()
-                            .max_w(px(680.0))
+                            .w_full()
                             .rounded_lg()
                             .px_4()
                             .py_3()
                             .bg(bg)
                             .text_color(theme.text_primary)
-                            .child(msg.content),
+                            .child(message_body),
                     ),
             )
         });

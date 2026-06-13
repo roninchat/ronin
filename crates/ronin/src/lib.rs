@@ -2,6 +2,9 @@
 
 //! Native Ronin launcher support.
 
+/// Markdown parsing and AST for GPUI rendering.
+pub mod markdown;
+
 use std::path::PathBuf;
 
 use ronin_core::RoninPaths;
