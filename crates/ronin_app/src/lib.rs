@@ -388,20 +388,17 @@ impl RoninShell {
 
         // 4. Load existing messages from DB for context
         let all_msgs = self.session.list_messages(thread_id)?;
-        self.state.messages = Some(all_msgs.clone());
 
         // 5. Build chat request with context caps (same logic as send_message_with_provider_inner)
         const MAX_MESSAGES: usize = 40;
         const MAX_CHARS: usize = 80_000;
 
-        let all_msgs_for_context: Vec<_> = all_msgs
-            .iter()
-            .filter(|m| m.id != assistant_msg_id)
-            .collect();
-
         let mut included = Vec::new();
         let mut total_chars = 0usize;
-        for msg in all_msgs_for_context.iter().rev() {
+        for msg in all_msgs.iter().rev() {
+            if msg.id == assistant_msg_id {
+                continue;
+            }
             if included.len() >= MAX_MESSAGES {
                 self.state.truncation_notice = true;
                 break;
@@ -412,7 +409,7 @@ impl RoninShell {
                 break;
             }
             total_chars += msg_chars;
-            included.push((*msg).clone());
+            included.push(msg);
         }
         included.reverse();
 
@@ -420,7 +417,7 @@ impl RoninShell {
             role: "system".to_string(),
             content: ronin_core::RONIN_SYSTEM_PROMPT.to_string(),
         }];
-        chat_messages.extend(included.iter().map(|m| ronin_core::ChatMessage {
+        chat_messages.extend(included.into_iter().map(|m| ronin_core::ChatMessage {
             role: match m.role {
                 MessageRole::User => "user".to_string(),
                 MessageRole::Assistant => "assistant".to_string(),
@@ -428,6 +425,8 @@ impl RoninShell {
             },
             content: m.content.clone(),
         }));
+
+        self.state.messages = Some(all_msgs);
 
         let request = ChatRequest {
             model: model.to_string(),
@@ -567,10 +566,10 @@ impl RoninShell {
                 .messages
                 .as_ref()
                 .and_then(|msgs| msgs.iter().find(|m| m.id == msg_id))
-                .map(|m| m.content.clone())
+                .map(|m| m.content.as_str())
                 .unwrap_or_default();
 
-            self.session.cancel_message(&msg_id, &current_content)?;
+            self.session.cancel_message(&msg_id, current_content)?;
 
             if let Some(ref mut msgs) = self.state.messages {
                 if let Some(msg) = msgs.iter_mut().find(|m| m.id == msg_id) {
@@ -641,22 +640,17 @@ impl RoninShell {
         // 4. Load existing messages from DB for context
         let all_msgs = self.session.list_messages(thread_id)?;
 
-        // 5. Update shell state with current messages
-        self.state.messages = Some(all_msgs.clone());
-
-        // 6. Build chat request with context caps
+        // 5. Build chat request with context caps
         const MAX_MESSAGES: usize = 40;
         const MAX_CHARS: usize = 80_000;
-
-        let all_msgs_for_context = all_msgs
-            .iter()
-            .filter(|m| m.id != assistant_msg.id)
-            .collect::<Vec<_>>();
 
         // Apply context caps: keep most recent messages within limits.
         let mut included = Vec::new();
         let mut total_chars = 0usize;
-        for msg in all_msgs_for_context.iter().rev() {
+        for msg in all_msgs.iter().rev() {
+            if msg.id == assistant_msg.id {
+                continue;
+            }
             if included.len() >= MAX_MESSAGES {
                 self.state.truncation_notice = true;
                 break;
@@ -667,7 +661,7 @@ impl RoninShell {
                 break;
             }
             total_chars += msg_chars;
-            included.push(*msg);
+            included.push(msg);
         }
         included.reverse();
 
@@ -675,7 +669,7 @@ impl RoninShell {
             role: "system".to_string(),
             content: ronin_core::RONIN_SYSTEM_PROMPT.to_string(),
         }];
-        chat_messages.extend(included.iter().map(|m| ronin_core::ChatMessage {
+        chat_messages.extend(included.into_iter().map(|m| ronin_core::ChatMessage {
             role: match m.role {
                 MessageRole::User => "user".to_string(),
                 MessageRole::Assistant => "assistant".to_string(),
@@ -683,6 +677,9 @@ impl RoninShell {
             },
             content: m.content.clone(),
         }));
+
+        // 6. Update shell state with current messages
+        self.state.messages = Some(all_msgs);
 
         let request = ChatRequest {
             model: model.to_string(),
@@ -704,7 +701,7 @@ impl RoninShell {
                     // Update in-memory state
                     if let Some(ref mut msgs) = self.state.messages {
                         if let Some(msg) = msgs.iter_mut().find(|m| m.id == assistant_msg.id) {
-                            msg.content = accumulated.clone();
+                            msg.content.push_str(&chunk);
                         }
                     }
                 }
