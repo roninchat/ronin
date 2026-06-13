@@ -23,6 +23,7 @@ fn run() -> Result<(), RunError> {
     let shell = match intent {
         LaunchIntent::OpenPersisted => RoninShell::open(paths)?,
         LaunchIntent::NewThread => RoninShell::open_with_new_thread(paths)?,
+        LaunchIntent::OpenWithOllama => RoninShell::open_with_ollama(paths)?,
     };
     tracing::info!(intent = ?intent, "ronin native shell starting");
 
@@ -104,7 +105,16 @@ impl Render for RoninWindow {
             .iter()
             .find(|thread| Some(thread.id.as_str()) == selected_thread_id);
         let status = match state.provider_status {
-            ProviderStatus::NotConfigured => "Provider: not configured\nModel: not selected",
+            ProviderStatus::NotConfigured => "Provider: not configured\nModel: not selected".to_string(),
+            ProviderStatus::OllamaOffline => {
+                "Provider: ollama\nModel: offline\n\nollama not reachable — is the server running?".to_string()
+            }
+            ProviderStatus::OllamaOnline { ref model } => {
+                format!("Provider: ollama\nModel: {model}")
+            }
+            ProviderStatus::OllamaNoModels => {
+                "Provider: ollama\nModel: none\n\nNo models installed.\nTry: ollama pull llama3.2".to_string()
+            }
         };
 
         let on_new_chat = cx.listener(Self::create_new_thread);

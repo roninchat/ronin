@@ -13,6 +13,8 @@ pub enum LaunchIntent {
     OpenPersisted,
     /// Open Ronin with a newly created empty chat selected.
     NewThread,
+    /// Open Ronin with Ollama selected as the local provider.
+    OpenWithOllama,
 }
 
 /// Errors returned by Ronin launcher setup.
@@ -23,7 +25,7 @@ pub enum LauncherError {
     MissingHome,
 
     /// CLI argument is not supported by the M0 launcher.
-    #[error("unsupported launch flag '{flag}'. supported flags: --new")]
+    #[error("unsupported launch flag '{flag}'. supported flags: --new, --provider ollama")]
     UnsupportedFlag {
         /// Unsupported flag supplied by the user.
         flag: String,
@@ -35,10 +37,24 @@ pub fn parse_launch_intent(
     args: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Result<LaunchIntent, LauncherError> {
     let mut intent = LaunchIntent::OpenPersisted;
-    for arg in args {
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
         let arg = arg.as_ref();
         match arg {
             "--new" => intent = LaunchIntent::NewThread,
+            "--provider" => match args.next().as_ref().map(AsRef::as_ref) {
+                Some("ollama") => intent = LaunchIntent::OpenWithOllama,
+                Some(provider) => {
+                    return Err(LauncherError::UnsupportedFlag {
+                        flag: format!("--provider {provider}"),
+                    });
+                }
+                None => {
+                    return Err(LauncherError::UnsupportedFlag {
+                        flag: "--provider".to_string(),
+                    });
+                }
+            },
             flag => {
                 return Err(LauncherError::UnsupportedFlag {
                     flag: flag.to_string(),
