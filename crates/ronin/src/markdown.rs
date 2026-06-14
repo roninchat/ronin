@@ -1,5 +1,5 @@
 /// Represents a parsed Markdown block.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum MarkdownBlock {
     /// A paragraph of text.
     Paragraph(Vec<Inline>),
@@ -15,14 +15,14 @@ pub enum MarkdownBlock {
 }
 
 /// Represents a list item.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct ListItem {
     /// Inlines within the list item.
     pub inlines: Vec<Inline>,
 }
 
 /// Represents an inline Markdown element.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Inline {
     /// Plain text.
     Text(String),
