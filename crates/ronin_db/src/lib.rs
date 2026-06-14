@@ -15,7 +15,10 @@ static TRACING_INIT: Once = Once::new();
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
-    (2, include_str!("../migrations/0002_artifacts_memories_attachments.sql")),
+    (
+        2,
+        include_str!("../migrations/0002_artifacts_memories_attachments.sql"),
+    ),
 ];
 
 /// Result type returned by `ronin_db` operations.
@@ -62,6 +65,16 @@ pub enum RoninDbError {
     #[error("failed to update message {id}")]
     UpdateMessage {
         /// Message id being updated.
+        id: String,
+        /// Underlying SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
+
+    /// Deleting a message failed.
+    #[error("failed to delete message {id}")]
+    DeleteMessage {
+        /// Message id being deleted.
         id: String,
         /// Underlying SQLite error.
         #[source]
@@ -430,6 +443,17 @@ impl RoninDb {
         Ok(())
     }
 
+    /// Deletes a message by ID.
+    pub fn delete_message(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM messages WHERE id = ?1", params![id])
+            .map_err(|source| RoninDbError::DeleteMessage {
+                id: id.to_string(),
+                source,
+            })?;
+        Ok(())
+    }
+
     /// Updates a message's status and error message without changing its content.
     pub fn update_message_status(
         &self,
@@ -539,9 +563,7 @@ impl RoninDb {
             .prepare("SELECT id, thread_id, message_id, title, content, created_at FROM artifacts WHERE id = ?1")
             .map_err(RoninDbError::GetArtifact)?;
 
-        let mut rows = stmt
-            .query(params![id])
-            .map_err(RoninDbError::GetArtifact)?;
+        let mut rows = stmt.query(params![id]).map_err(RoninDbError::GetArtifact)?;
 
         if let Some(row) = rows.next().map_err(RoninDbError::GetArtifact)? {
             Ok(Some(DbArtifact {
@@ -621,7 +643,9 @@ impl RoninDb {
     pub fn get_memory(&self, id: &str) -> Result<Option<DbMemory>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, title, content, created_at, updated_at FROM memories WHERE id = ?1")
+            .prepare(
+                "SELECT id, title, content, created_at, updated_at FROM memories WHERE id = ?1",
+            )
             .map_err(RoninDbError::GetMemory)?;
 
         let mut rows = stmt.query(params![id]).map_err(RoninDbError::GetMemory)?;

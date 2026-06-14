@@ -539,6 +539,11 @@ impl RoninSession {
             .map_err(Into::into)
     }
 
+    /// Deletes a message.
+    pub fn delete_message(&self, message_id: &str) -> Result<()> {
+        self.db.delete_message(message_id).map_err(Into::into)
+    }
+
     /// Fails a message with an error.
     pub fn fail_message(&self, message_id: &str, content: &str, error_message: &str) -> Result<()> {
         self.db
@@ -607,7 +612,7 @@ impl RoninSession {
     pub fn list_artifacts(&self, thread_id: &str) -> Result<Vec<Artifact>> {
         self.db
             .list_artifacts_for_thread(thread_id)
-            .map(|artifacts| artifacts.into_iter().map(|a| Artifact::from(a)).collect())
+            .map(|artifacts| artifacts.into_iter().map(Artifact::from).collect())
             .map_err(Into::into)
     }
 
@@ -628,7 +633,7 @@ impl RoninSession {
     pub fn list_memories(&self) -> Result<Vec<Memory>> {
         self.db
             .list_all_memories()
-            .map(|memories| memories.into_iter().map(|m| Memory::from(m)).collect())
+            .map(|memories| memories.into_iter().map(Memory::from).collect())
             .map_err(Into::into)
     }
 
@@ -661,7 +666,12 @@ impl RoninSession {
     pub fn list_attachments(&self, message_id: &str) -> Result<Vec<Attachment>> {
         self.db
             .list_attachments_for_message(message_id)
-            .map(|attachments| attachments.into_iter().map(|a| Attachment::from(a)).collect())
+            .map(|attachments| {
+                attachments
+                    .into_iter()
+                    .map(Attachment::from)
+                    .collect()
+            })
             .map_err(Into::into)
     }
 
