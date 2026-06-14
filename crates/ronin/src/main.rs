@@ -52,6 +52,8 @@ fn run() -> Result<(), RunError> {
                         None
                     },
                     needs_initial_focus: true,
+                    copied_state: None,
+                    parsed_messages: std::collections::HashMap::new(),
                 })
             },
         );
@@ -85,6 +87,8 @@ struct RoninWindow {
     composer_focus: FocusHandle,
     chat_provider: Option<HttpOllamaProvider>,
     needs_initial_focus: bool,
+    copied_state: Option<(String, std::time::Instant)>,
+    parsed_messages: std::collections::HashMap<String, (usize, Vec<ronin::markdown::MarkdownBlock>)>,
 }
 
 impl RoninWindow {
@@ -223,6 +227,12 @@ impl RoninWindow {
         cx.notify();
     }
 
+    fn copy_to_clipboard(&mut self, id: String, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+        self.copied_state = Some((id, std::time::Instant::now()));
+        cx.notify();
+    }
+
     fn on_global_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -270,10 +280,10 @@ impl RoninWindow {
 
     fn render_sidebar(
         &self,
-        state: &ShellState,
         theme: &M0Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let state = self.shell.state();
         let selected_thread_id = state.selected_thread_id.as_deref();
         let on_new_chat = cx.listener(Self::create_new_thread);
 
@@ -388,8 +398,9 @@ impl RoninWindow {
         }
     }
 
-    fn render_messages(&self, state: &ShellState, theme: &M0Theme) -> impl IntoElement {
-        let messages = match state.messages.as_ref() {
+    fn render_messages(&mut self, theme: &M0Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let messages_opt = self.shell.state().messages.clone();
+        let messages = match messages_opt {
             Some(msgs) if !msgs.is_empty() => msgs.clone(),
             _ => {
                 return div()
@@ -416,10 +427,28 @@ impl RoninWindow {
 
             let raw_content = msg.content.clone();
 
+            let is_copied = self.copied_state.as_ref().map(|(id, _)| id) == Some(&msg.id);
+            let copy_text = if is_copied { "Copied!" } else { "Copy" };
+
             let mut message_body = div().w_full().flex().flex_col().gap_3();
 
-            let blocks = ronin::markdown::parse_markdown(&msg.content);
-            for block in blocks {
+            let blocks = if let Some((len, cached_blocks)) = self.parsed_messages.get(&msg.id) {
+                if *len == msg.content.len() {
+                    Some(cached_blocks.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let blocks = blocks.unwrap_or_else(|| {
+                let parsed = ronin::markdown::parse_markdown(&msg.content);
+                self.parsed_messages.insert(msg.id.clone(), (msg.content.len(), parsed.clone()));
+                parsed
+            });
+
+            for (block_idx, block) in blocks.into_iter().enumerate() {
                 let block_el = match block {
                     ronin::markdown::MarkdownBlock::Paragraph(inlines) => {
                         let mut p = div().w_full().flex().flex_row().flex_wrap().gap_1();
@@ -449,25 +478,59 @@ impl RoninWindow {
                     }
                     ronin::markdown::MarkdownBlock::CodeBlock { language, content } => {
                         let lang_label = language.unwrap_or_else(|| "text".to_string());
-                        let mut code_lines =
-                            div().w_full().font_family("Courier New").flex().flex_col();
-                        for line in content.split('\n') {
-                            code_lines = code_lines.child(div().w_full().child(line.to_string()));
-                        }
-                        div()
+                        let mut code_lines = div()
+                            .id(gpui::SharedString::from(format!("{}-code-scroll-{}", msg.id, block_idx)))
                             .w_full()
-                            .bg(theme.surface_hover)
-                            .rounded_md()
-                            .p_3()
+                            .font_family("Courier New")
                             .flex()
                             .flex_col()
-                            .gap_2()
+                            .overflow_x_scroll();
+
+                        for line in content.split('\n') {
+                            code_lines = code_lines.child(div().child(line.to_string()));
+                        }
+
+                        let block_id = format!("{}-code-{}", msg.id, block_idx);
+                        let is_block_copied = self.copied_state.as_ref().map(|(id, _)| id) == Some(&block_id);
+                        let block_copy_text = if is_block_copied { "Copied!" } else { "Copy" };
+                        let code_content = content.clone();
+
+                        let header = div()
+                            .w_full()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(theme.text_muted)
                                     .child(lang_label),
                             )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if is_block_copied { theme.text_primary } else { theme.accent })
+                                    .cursor_pointer()
+                                    .child(block_copy_text)
+                                    .on_mouse_down(MouseButton::Left, cx.listener({
+                                        let block_id = block_id.clone();
+                                        let code_content = code_content.clone();
+                                        move |this, _, _, cx| {
+                                            this.copy_to_clipboard(block_id.clone(), code_content.clone(), cx);
+                                        }
+                                    })),
+                            );
+
+                        div()
+                            .w_full()
+                            .overflow_hidden()
+                            .bg(theme.surface_hover)
+                            .rounded_md()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(header)
                             .child(code_lines)
                     }
                     ronin::markdown::MarkdownBlock::List(items) => {
@@ -530,14 +593,16 @@ impl RoninWindow {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(theme.accent)
+                                    .text_color(if is_copied { theme.text_primary } else { theme.accent })
                                     .cursor_pointer()
-                                    .child("Copy")
-                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                            raw_content.clone(),
-                                        ));
-                                    }),
+                                    .child(copy_text)
+                                    .on_mouse_down(MouseButton::Left, cx.listener({
+                                        let msg_id = msg.id.clone();
+                                        let raw_content = raw_content.clone();
+                                        move |this, _, _, cx| {
+                                            this.copy_to_clipboard(msg_id.clone(), raw_content.clone(), cx);
+                                        }
+                                    })),
                             ),
                     )
                     .child(
@@ -670,8 +735,16 @@ impl Render for RoninWindow {
         }
 
         let theme = M0Theme::dark();
-        let state = self.shell.state();
         let composer_focused = self.composer_focus.is_focused(window);
+
+        let sidebar = self.render_sidebar(&theme, cx);
+        
+        let title = Self::current_thread_title(self.shell.state())
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "New Chat".to_string());
+            
+        let messages = self.render_messages(&theme, cx);
+        let composer = self.render_composer(&theme, composer_focused, cx);
 
         let ui = div()
             .size_full()
@@ -680,7 +753,7 @@ impl Render for RoninWindow {
             .text_color(theme.text_primary)
             .font_family("Inter")
             .on_key_down(cx.listener(Self::on_global_key_down))
-            .child(self.render_sidebar(state, &theme, cx))
+            .child(sidebar)
             .child(
                 div()
                     .flex_1()
@@ -693,14 +766,10 @@ impl Render for RoninWindow {
                             .border_color(theme.border_subtle)
                             .px_6()
                             .py_4()
-                            .child(
-                                Self::current_thread_title(state)
-                                    .map(|t| t.to_string())
-                                    .unwrap_or_else(|| "New Chat".to_string()),
-                            ),
+                            .child(title),
                     )
-                    .child(self.render_messages(state, &theme))
-                    .child(self.render_composer(&theme, composer_focused, cx)),
+                    .child(messages)
+                    .child(composer),
             );
 
         // If streaming is active, schedule a repaint on the next animation frame.
@@ -708,7 +777,20 @@ impl Render for RoninWindow {
         // skips invalidation while the window is already drawing (inside render).
         // request_animation_frame() defers the notify to the next frame callback,
         // reliably driving continuous repaints during streaming.
-        if streaming_active {
+        let mut needs_frame = streaming_active;
+
+        if let Some((_, time)) = self.copied_state.as_ref() {
+            if time.elapsed().as_secs_f32() >= 1.0 {
+                self.copied_state = None;
+                // Since we change state during render, we need to request a frame
+                // to reflect the cleared state.
+                needs_frame = true;
+            } else {
+                needs_frame = true;
+            }
+        }
+
+        if needs_frame {
             window.request_animation_frame();
         }
 
