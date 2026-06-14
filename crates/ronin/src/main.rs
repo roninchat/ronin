@@ -88,7 +88,8 @@ struct RoninWindow {
     chat_provider: Option<HttpOllamaProvider>,
     needs_initial_focus: bool,
     copied_state: Option<(String, std::time::Instant)>,
-    parsed_messages: std::collections::HashMap<String, (usize, Vec<ronin::markdown::MarkdownBlock>)>,
+    parsed_messages:
+        std::collections::HashMap<String, (usize, Vec<ronin::markdown::MarkdownBlock>)>,
 }
 
 impl RoninWindow {
@@ -117,7 +118,7 @@ impl RoninWindow {
             Some(provider) => {
                 let result =
                     self.shell
-                        .begin_streaming(&thread_id, &text, Box::new(provider), &model);
+                        .begin_streaming(&thread_id, Some(&text), Box::new(provider), &model);
                 match result {
                     Ok(()) => {
                         cx.notify();
@@ -248,6 +249,12 @@ impl RoninWindow {
             "l" | "k" if keystroke.modifiers.control => {
                 self.focus_composer_shortcut(window, cx);
             }
+            "r" if keystroke.modifiers.control => {
+                self.retry_generation_shortcut(window, cx);
+            }
+            "g" if keystroke.modifiers.control && keystroke.modifiers.shift => {
+                self.regenerate_message_shortcut(cx);
+            }
             "escape" => {
                 self.cancel_generation(cx);
             }
@@ -271,18 +278,88 @@ impl RoninWindow {
     }
 
     // Shortcuts whose features are not added yet
-    fn edit_message_shortcut(&mut self, _cx: &mut Context<Self>) {}
-    fn branch_message_shortcut(&mut self, _cx: &mut Context<Self>) {}
-    fn retry_generation_shortcut(&mut self, _cx: &mut Context<Self>) {}
-    fn regenerate_message_shortcut(&mut self, _cx: &mut Context<Self>) {}
-    fn delete_message_shortcut(&mut self, _cx: &mut Context<Self>) {}
-    fn archive_thread_shortcut(&mut self, _cx: &mut Context<Self>) {}
+    fn retry_generation_shortcut(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let msgs = match &self.shell.state().messages {
+            Some(m) => m,
+            None => return,
+        };
+        if let Some(msg) = msgs.iter().rfind(|m| {
+            m.status == ronin_core::MessageStatus::Failed
+                || m.status == ronin_core::MessageStatus::Error
+        }) {
+            let id = msg.id.clone();
+            self.retry_failed_message(id, cx);
+        }
+    }
 
-    fn render_sidebar(
-        &self,
-        theme: &M0Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn regenerate_message_shortcut(&mut self, cx: &mut Context<Self>) {
+        self.regenerate_last_assistant(cx);
+    }
+
+    fn retry_failed_message(&mut self, message_id: String, cx: &mut Context<Self>) {
+        if self.shell.is_generation_active() {
+            return;
+        }
+
+        let provider = match self.chat_provider.take() {
+            Some(p) => p,
+            None => HttpOllamaProvider::new("http://localhost:11434"),
+        };
+
+        let model = match &self.shell.state().provider_status {
+            ProviderStatus::OllamaOnline { model } => model.clone(),
+            _ => {
+                self.chat_provider = Some(provider);
+                return;
+            }
+        };
+
+        if let Err(e) = self
+            .shell
+            .retry_message(&message_id, Box::new(provider), &model)
+        {
+            tracing::error!(%e, "failed to retry message");
+            self.chat_provider = Some(HttpOllamaProvider::new("http://localhost:11434"));
+        }
+        cx.notify();
+    }
+
+    fn regenerate_last_assistant(&mut self, cx: &mut Context<Self>) {
+        if self.shell.is_generation_active() {
+            return;
+        }
+
+        let thread_id = match self.shell.state().selected_thread_id.clone() {
+            Some(id) => id,
+            None => return,
+        };
+
+        let provider = match self.chat_provider.take() {
+            Some(p) => p,
+            None => HttpOllamaProvider::new("http://localhost:11434"),
+        };
+
+        let model = match &self.shell.state().provider_status {
+            ProviderStatus::OllamaOnline { model } => model.clone(),
+            _ => {
+                self.chat_provider = Some(provider);
+                return;
+            }
+        };
+
+        if let Err(e) = self
+            .shell
+            .regenerate_last_assistant(&thread_id, Box::new(provider), &model)
+        {
+            tracing::error!(%e, "failed to regenerate message");
+            self.chat_provider = Some(HttpOllamaProvider::new("http://localhost:11434"));
+        }
+        cx.notify();
+    }
+
+
+
+    fn render_sidebar(&self, theme: &M0Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.shell.state();
         let selected_thread_id = state.selected_thread_id.as_deref();
         let on_new_chat = cx.listener(Self::create_new_thread);
@@ -414,6 +491,12 @@ impl RoninWindow {
 
         let is_generating = self.shell.is_generation_active();
 
+        let last_assistant_id = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == MessageRole::Assistant)
+            .map(|m| m.id.clone());
+
         let message_elements = messages.into_iter().filter_map(|msg| {
             if msg.role == MessageRole::System {
                 return None;
@@ -444,7 +527,8 @@ impl RoninWindow {
 
             let blocks = blocks.unwrap_or_else(|| {
                 let parsed = ronin::markdown::parse_markdown(&msg.content);
-                self.parsed_messages.insert(msg.id.clone(), (msg.content.len(), parsed.clone()));
+                self.parsed_messages
+                    .insert(msg.id.clone(), (msg.content.len(), parsed.clone()));
                 parsed
             });
 
@@ -479,7 +563,10 @@ impl RoninWindow {
                     ronin::markdown::MarkdownBlock::CodeBlock { language, content } => {
                         let lang_label = language.unwrap_or_else(|| "text".to_string());
                         let mut code_lines = div()
-                            .id(gpui::SharedString::from(format!("{}-code-scroll-{}", msg.id, block_idx)))
+                            .id(gpui::SharedString::from(format!(
+                                "{}-code-scroll-{}",
+                                msg.id, block_idx
+                            )))
                             .w_full()
                             .font_family("Courier New")
                             .flex()
@@ -491,7 +578,8 @@ impl RoninWindow {
                         }
 
                         let block_id = format!("{}-code-{}", msg.id, block_idx);
-                        let is_block_copied = self.copied_state.as_ref().map(|(id, _)| id) == Some(&block_id);
+                        let is_block_copied =
+                            self.copied_state.as_ref().map(|(id, _)| id) == Some(&block_id);
                         let block_copy_text = if is_block_copied { "Copied!" } else { "Copy" };
                         let code_content = content.clone();
 
@@ -509,16 +597,27 @@ impl RoninWindow {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(if is_block_copied { theme.text_primary } else { theme.accent })
+                                    .text_color(if is_block_copied {
+                                        theme.text_primary
+                                    } else {
+                                        theme.accent
+                                    })
                                     .cursor_pointer()
                                     .child(block_copy_text)
-                                    .on_mouse_down(MouseButton::Left, cx.listener({
-                                        let block_id = block_id.clone();
-                                        let code_content = code_content.clone();
-                                        move |this, _, _, cx| {
-                                            this.copy_to_clipboard(block_id.clone(), code_content.clone(), cx);
-                                        }
-                                    })),
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener({
+                                            let block_id = block_id.clone();
+                                            let code_content = code_content.clone();
+                                            move |this, _, _, cx| {
+                                                this.copy_to_clipboard(
+                                                    block_id.clone(),
+                                                    code_content.clone(),
+                                                    cx,
+                                                );
+                                            }
+                                        }),
+                                    ),
                             );
 
                         div()
@@ -576,6 +675,58 @@ impl RoninWindow {
                 message_body = message_body.child(block_el);
             }
 
+            let is_last_assistant = Some(&msg.id) == last_assistant_id.as_ref();
+            let mut message_actions = div().flex().flex_row().gap_3()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if is_copied { theme.text_primary } else { theme.accent })
+                        .cursor_pointer()
+                        .child(copy_text)
+                        .on_mouse_down(MouseButton::Left, cx.listener({
+                            let msg_id = msg.id.clone();
+                            let raw_content = raw_content.clone();
+                            move |this, _, _, cx| {
+                                this.copy_to_clipboard(msg_id.clone(), raw_content.clone(), cx);
+                            }
+                        }))
+                );
+
+            if msg.role == MessageRole::Assistant && (msg.status == ronin_core::MessageStatus::Failed || msg.status == ronin_core::MessageStatus::Error) {
+                message_actions = message_actions.child(
+                    div()
+                        .text_xs()
+                        .text_color(if is_generating { theme.text_muted } else { theme.accent })
+                        .cursor_pointer()
+                        .child("Retry")
+                        .on_mouse_down(MouseButton::Left, cx.listener({
+                            let msg_id = msg.id.clone();
+                            move |this, _, _, cx| {
+                                if !this.shell.is_generation_active() {
+                                    this.retry_failed_message(msg_id.clone(), cx);
+                                }
+                            }
+                        }))
+                );
+            }
+
+            if is_last_assistant && (msg.status == ronin_core::MessageStatus::Complete || msg.status == ronin_core::MessageStatus::Cancelled) {
+                message_actions = message_actions.child(
+                    div()
+                        .text_xs()
+                        .text_color(if is_generating { theme.text_muted } else { theme.accent })
+                        .cursor_pointer()
+                        .child("Regenerate")
+                        .on_mouse_down(MouseButton::Left, cx.listener({
+                            move |this, _, _, cx| {
+                                if !this.shell.is_generation_active() {
+                                    this.regenerate_last_assistant(cx);
+                                }
+                            }
+                        }))
+                );
+            }
+
             Some(
                 div()
                     .w_full()
@@ -590,20 +741,7 @@ impl RoninWindow {
                             .justify_between()
                             .mb_1()
                             .child(div().text_xs().text_color(theme.text_muted).child(label))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(if is_copied { theme.text_primary } else { theme.accent })
-                                    .cursor_pointer()
-                                    .child(copy_text)
-                                    .on_mouse_down(MouseButton::Left, cx.listener({
-                                        let msg_id = msg.id.clone();
-                                        let raw_content = raw_content.clone();
-                                        move |this, _, _, cx| {
-                                            this.copy_to_clipboard(msg_id.clone(), raw_content.clone(), cx);
-                                        }
-                                    })),
-                            ),
+                            .child(message_actions),
                     )
                     .child(
                         div()
@@ -738,11 +876,11 @@ impl Render for RoninWindow {
         let composer_focused = self.composer_focus.is_focused(window);
 
         let sidebar = self.render_sidebar(&theme, cx);
-        
+
         let title = Self::current_thread_title(self.shell.state())
             .map(|t| t.to_string())
             .unwrap_or_else(|| "New Chat".to_string());
-            
+
         let messages = self.render_messages(&theme, cx);
         let composer = self.render_composer(&theme, composer_focused, cx);
 

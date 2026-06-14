@@ -43,7 +43,7 @@ fn cancel_streaming_should_stop_appending_chunks_and_mark_cancelled() {
     shell
         .begin_streaming(
             &thread_id,
-            "start",
+            Some("start"),
             Box::new(InfiniteProvider),
             "test-model",
         )
@@ -86,7 +86,7 @@ fn cancel_streaming_should_allow_new_generation_after_cancel() {
     shell
         .begin_streaming(
             &thread_id,
-            "start",
+            Some("start"),
             Box::new(InfiniteProvider),
             "test-model",
         )
@@ -96,7 +96,7 @@ fn cancel_streaming_should_allow_new_generation_after_cancel() {
     let err = shell
         .begin_streaming(
             &thread_id,
-            "again",
+            Some("again"),
             Box::new(InfiniteProvider),
             "test-model",
         )
@@ -126,7 +126,7 @@ fn shell_open_should_repair_stale_streaming_messages_on_startup() {
     let mut shell = RoninShell::open(paths.clone()).expect("open shell");
     let thread_id = shell.state().selected_thread_id.clone().unwrap();
     shell
-        .begin_streaming(&thread_id, "run", Box::new(InfiniteProvider), "test-model")
+        .begin_streaming(&thread_id, Some("run"), Box::new(InfiniteProvider), "test-model")
         .expect("begin streaming");
 
     // Drop the shell simulating a crash/exit without completion
@@ -161,7 +161,7 @@ fn cancelled_message_should_not_be_resumable() {
     shell
         .begin_streaming(
             &thread_id,
-            "start",
+            Some("start"),
             Box::new(InfiniteProvider),
             "test-model",
         )

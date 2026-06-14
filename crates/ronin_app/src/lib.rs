@@ -29,6 +29,10 @@ pub enum RoninAppError {
     /// Generation is already in progress.
     #[error("generation in progress")]
     GenerationInProgress,
+
+    /// Action cannot be performed on the target message.
+    #[error("invalid message for action")]
+    InvalidMessage,
 }
 
 /// Basic provider/model status shown in the sidebar.
@@ -353,7 +357,7 @@ impl RoninShell {
     pub fn begin_streaming(
         &mut self,
         thread_id: &str,
-        content: &str,
+        content: Option<&str>,
         provider: Box<dyn ChatProvider + Send>,
         model: &str,
     ) -> Result<()> {
@@ -362,22 +366,23 @@ impl RoninShell {
         }
         self.generation_active = true;
 
-        // 1. Persist user message
-        self.session
-            .create_message(thread_id, MessageRole::User, content)?;
+        // 1. Persist user message and derive title if provided
+        if let Some(user_content) = content {
+            self.session
+                .create_message(thread_id, MessageRole::User, user_content)?;
 
-        // 2. Derive title if still "New Chat"
-        let current_title = self
-            .state
-            .threads
-            .iter()
-            .find(|t| t.id == thread_id)
-            .map(|t| t.title.as_str());
-        if current_title == Some("New Chat") {
-            let derived = derive_thread_title(content);
-            self.session.update_thread_title(thread_id, &derived)?;
-            if let Some(thread) = self.state.threads.iter_mut().find(|t| t.id == thread_id) {
-                thread.title = derived;
+            let current_title = self
+                .state
+                .threads
+                .iter()
+                .find(|t| t.id == thread_id)
+                .map(|t| t.title.as_str());
+            if current_title == Some("New Chat") {
+                let derived = derive_thread_title(user_content);
+                self.session.update_thread_title(thread_id, &derived)?;
+                if let Some(thread) = self.state.threads.iter_mut().find(|t| t.id == thread_id) {
+                    thread.title = derived;
+                }
             }
         }
 
@@ -470,8 +475,11 @@ impl RoninShell {
                     }
                     ChatStreamEvent::Error(e) => {
                         // Persist what we have before reporting error.
-                        let _ = session_clone
-                            .complete_message(&assistant_msg_id_for_thread, &accumulated);
+                        let _ = session_clone.fail_message(
+                            &assistant_msg_id_for_thread,
+                            &accumulated,
+                            &e,
+                        );
                         let _ = tx.send(StreamUpdate::Error(e));
                         return;
                     }
@@ -533,6 +541,12 @@ impl RoninShell {
                     return false;
                 }
                 Ok(StreamUpdate::Error(e)) => {
+                    if let Some(ref mut msgs) = self.state.messages {
+                        if let Some(msg) = msgs.iter_mut().find(|m| m.id == msg_id) {
+                            msg.status = MessageStatus::Failed;
+                            msg.error_message = Some(e.clone());
+                        }
+                    }
                     tracing::error!("provider stream error: {e}");
                     self.streaming_rx = None;
                     self.streaming_msg_id = None;
@@ -605,6 +619,98 @@ impl RoninShell {
         let result = self.send_message_with_provider_inner(thread_id, content, provider, model);
         self.generation_active = false;
         result
+    }
+
+    /// Retries a failed assistant message.
+    ///
+    /// Finds the preceding user message, creates a new user message with the same content,
+    /// and begins streaming a new response. The original failed message is preserved.
+    pub fn retry_message(
+        &mut self,
+        message_id: &str,
+        provider: Box<dyn ChatProvider + Send>,
+        model: &str,
+    ) -> Result<()> {
+        if self.generation_active {
+            return Err(RoninAppError::GenerationInProgress);
+        }
+
+        let thread_id = self.state.selected_thread_id.clone().ok_or_else(|| {
+            RoninAppError::ThreadNotLoaded {
+                thread_id: "".to_string(),
+            }
+        })?;
+
+        let msgs = self.session.list_messages(&thread_id)?;
+
+        let failed_idx = msgs
+            .iter()
+            .position(|m| m.id == message_id)
+            .ok_or(RoninAppError::InvalidMessage)?;
+
+        let mut user_content = String::new();
+        for msg in msgs[..failed_idx].iter().rev() {
+            if msg.role == MessageRole::User {
+                user_content = msg.content.clone();
+                break;
+            }
+        }
+
+        if user_content.is_empty() {
+            return Err(RoninAppError::InvalidMessage);
+        }
+
+        self.begin_streaming(&thread_id, Some(&user_content), provider, model)
+    }
+
+    /// Regenerates the last assistant message.
+    ///
+    /// Finds the last assistant message, marks it as cancelled, and re-sends
+    /// the preceding user messages to stream a new response.
+    pub fn regenerate_last_assistant(
+        &mut self,
+        thread_id: &str,
+        provider: Box<dyn ChatProvider + Send>,
+        model: &str,
+    ) -> Result<()> {
+        if self.generation_active {
+            return Err(RoninAppError::GenerationInProgress);
+        }
+
+        let msgs = self.session.list_messages(thread_id)?;
+
+        // Find the last assistant message
+        let last_assistant_idx = msgs.iter().rposition(|m| m.role == MessageRole::Assistant);
+
+        let last_assistant_idx = match last_assistant_idx {
+            Some(idx) => idx,
+            None => return Ok(()), // no-op if no assistant message
+        };
+
+        let last_assistant = &msgs[last_assistant_idx];
+
+        // Ensure we only regenerate complete or cancelled messages
+        if last_assistant.status == MessageStatus::Streaming {
+            return Err(RoninAppError::GenerationInProgress);
+        }
+
+        // Delete it
+        self.session.delete_message(&last_assistant.id)?;
+
+        // Find preceding user message
+        let mut user_content = String::new();
+        for msg in msgs[..last_assistant_idx].iter().rev() {
+            if msg.role == MessageRole::User {
+                user_content = msg.content.clone();
+                break;
+            }
+        }
+
+        if user_content.is_empty() {
+            return Err(RoninAppError::InvalidMessage);
+        }
+
+        self.begin_streaming(thread_id, None, provider, model)
     }
 
     fn send_message_with_provider_inner(

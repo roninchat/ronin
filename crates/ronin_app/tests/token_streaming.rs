@@ -49,7 +49,7 @@ fn poll_streaming_should_drain_all_available_chunks_and_append_deltas() {
     };
 
     shell
-        .begin_streaming(&thread_id, "hi", Box::new(provider), "test-model")
+        .begin_streaming(&thread_id, Some("hi"), Box::new(provider), "test-model")
         .expect("begin streaming");
 
     // Let bg thread finish sending all chunks + Done.
@@ -111,7 +111,7 @@ fn poll_streaming_should_return_true_when_chunks_still_arriving() {
     }
 
     shell
-        .begin_streaming(&thread_id, "hi", Box::new(SlowProvider), "test-model")
+        .begin_streaming(&thread_id, Some("hi"), Box::new(SlowProvider), "test-model")
         .expect("begin streaming");
 
     // Wait just long enough for first chunk but not second.
@@ -170,7 +170,7 @@ fn poll_streaming_should_handle_error_during_stream() {
     shell
         .begin_streaming(
             &thread_id,
-            "hi",
+            Some("hi"),
             Box::new(ErrorAfterOneProvider),
             "test-model",
         )

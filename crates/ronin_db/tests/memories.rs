@@ -12,10 +12,9 @@ fn memory_crud_round_trip() {
     let (db, _temp) = open_test_db();
 
     // 1. Create
-    let memory = db.create_memory(
-        "User Preference",
-        "User prefers Rust for backend"
-    ).expect("create memory");
+    let memory = db
+        .create_memory("User Preference", "User prefers Rust for backend")
+        .expect("create memory");
 
     assert_eq!(memory.title, "User Preference");
     assert_eq!(memory.content, "User prefers Rust for backend");
@@ -23,7 +22,10 @@ fn memory_crud_round_trip() {
     assert_eq!(memory.updated_at, memory.created_at);
 
     // 2. Get by ID
-    let fetched = db.get_memory(&memory.id).expect("get memory").expect("memory should exist");
+    let fetched = db
+        .get_memory(&memory.id)
+        .expect("get memory")
+        .expect("memory should exist");
     assert_eq!(fetched, memory);
 
     // 3. List all
