@@ -1433,6 +1433,29 @@ impl RoninShell {
             .update_memory(id, title, content)
             .map_err(Into::into)
     }
+
+    /// Creates a new artifact.
+    pub fn create_artifact(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        title: &str,
+        content: &str,
+    ) -> Result<ronin_core::Artifact> {
+        self.session
+            .create_artifact(thread_id, message_id, title, content)
+            .map_err(Into::into)
+    }
+
+    /// Lists all artifacts across all threads, newest first.
+    pub fn list_all_artifacts(&self) -> Result<Vec<ronin_core::Artifact>> {
+        self.session.list_all_artifacts().map_err(Into::into)
+    }
+
+    /// Deletes an artifact by ID.
+    pub fn delete_artifact(&self, id: &ronin_core::ArtifactId) -> Result<()> {
+        self.session.delete_artifact(id).map_err(Into::into)
+    }
 }
 
 enum ToolCall {

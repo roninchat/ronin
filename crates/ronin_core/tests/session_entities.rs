@@ -34,6 +34,32 @@ fn session_artifact_crud() {
 }
 
 #[test]
+fn session_list_all_artifacts_across_threads() {
+    let (session, _temp) = setup_session();
+    let thread1 = session.create_thread().unwrap();
+    let msg1 = session
+        .create_message(&thread1.id, MessageRole::User, "hello")
+        .unwrap();
+    let thread2 = session.create_thread().unwrap();
+    let msg2 = session
+        .create_message(&thread2.id, MessageRole::User, "world")
+        .unwrap();
+
+    let art1 = session
+        .create_artifact(&thread1.id, &msg1.id, "A1", "c1")
+        .unwrap();
+    let art2 = session
+        .create_artifact(&thread2.id, &msg2.id, "A2", "c2")
+        .unwrap();
+
+    let all = session.list_all_artifacts().unwrap();
+    assert_eq!(all.len(), 2);
+    // newest first
+    assert_eq!(all[0].id, art2.id);
+    assert_eq!(all[1].id, art1.id);
+}
+
+#[test]
 fn session_memory_crud() {
     let (session, _temp) = setup_session();
 

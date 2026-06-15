@@ -69,6 +69,7 @@ fn run() -> Result<(), RunError> {
                         needs_initial_focus: true,
                         copied_state: None,
                         memories_panel_open: false,
+                        artifacts_panel_open: false,
                         parsed_messages: std::collections::HashMap::new(),
                         completion_index: 0,
                         pending_clipboard_read: None,
@@ -113,6 +114,7 @@ struct RoninWindow {
     needs_initial_focus: bool,
     copied_state: Option<(String, std::time::Instant)>,
     memories_panel_open: bool,
+    artifacts_panel_open: bool,
     parsed_messages:
         std::collections::HashMap<String, (usize, Vec<ronin::markdown::MarkdownBlock>)>,
     completion_index: usize,
@@ -185,6 +187,19 @@ impl RoninWindow {
                     } else {
                         self.attachment_errors
                             .push(format!("Failed to list memories for {id}"));
+                    }
+                }
+                ContextToolRef::Artifact(id) => {
+                    if let Ok(arts) = self.shell.list_all_artifacts() {
+                        if let Some(a) = arts.into_iter().find(|a| a.id.0 == id) {
+                            attachments.push(ronin_core::artifact_attachment(&a));
+                        } else {
+                            self.attachment_errors
+                                .push(format!("Artifact not found: {id}"));
+                        }
+                    } else {
+                        self.attachment_errors
+                            .push(format!("Failed to list artifacts for {id}"));
                     }
                 }
             }
@@ -286,6 +301,7 @@ impl RoninWindow {
                     .to_string(),
                 ContextToolRef::Clipboard => "clipboard".to_string(),
                 ContextToolRef::Memory(id) => format!("memory:{}", id),
+                ContextToolRef::Artifact(id) => format!("artifact:{}", id),
             }
         }));
         labels
@@ -765,6 +781,26 @@ impl RoninWindow {
         }
     }
 
+    fn save_as_artifact(
+        &mut self,
+        thread_id: String,
+        message_id: String,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let title: String = text.chars().take(60).collect();
+        let content = text;
+        if let Err(e) = self
+            .shell
+            .create_artifact(&thread_id, &message_id, &title, &content)
+        {
+            tracing::error!(%e, "failed to save artifact");
+        } else {
+            self.artifacts_panel_open = true;
+            cx.notify();
+        }
+    }
+
     fn on_global_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -953,10 +989,28 @@ impl RoninWindow {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
-                            this.memories_panel_open = !this.memories_panel_open;
-                            cx.notify();
-                        }),
-                    ),
+                                this.memories_panel_open = !this.memories_panel_open;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .rounded_lg()
+                        .px_3()
+                        .py_2()
+                        .bg(theme.surface_muted)
+                        .text_color(theme.text_primary)
+                        .font_weight(FontWeight(500.))
+                        .child("Artifacts")
+                        .hover(|style| style.bg(theme.surface_hover).cursor_pointer())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.artifacts_panel_open = !this.artifacts_panel_open;
+                                cx.notify();
+                            }),
+                        ),
             )
             .child(
                 div()
@@ -1253,6 +1307,29 @@ impl RoninWindow {
                                 let raw_content = raw_content.clone();
                                 move |this, _, _, cx| {
                                     this.save_as_memory(raw_content.clone(), cx);
+                                }
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.accent)
+                        .cursor_pointer()
+                        .child("Save as artifact")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener({
+                                let thread_id = msg.thread_id.clone();
+                                let msg_id = msg.id.clone();
+                                let raw_content = raw_content.clone();
+                                move |this, _, _, cx| {
+                                    this.save_as_artifact(
+                                        thread_id.clone(),
+                                        msg_id.clone(),
+                                        raw_content.clone(),
+                                        cx,
+                                    );
                                 }
                             }),
                         ),
@@ -1696,6 +1773,97 @@ impl RoninWindow {
             )
             .child(list)
     }
+
+    fn render_artifacts_panel(
+        &mut self,
+        theme: &M0Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let artifacts = self.shell.list_all_artifacts().unwrap_or_default();
+
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .id("artifacts-list")
+            .overflow_y_scroll()
+            .w_full()
+            .h_full();
+        for art in artifacts {
+            let id = art.id.clone();
+            list = list.child(
+                div()
+                    .p_3()
+                    .bg(theme.surface_hover)
+                    .rounded_md()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().font_weight(FontWeight(600.)).child(art.title))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.text_muted)
+                            .child(art.content.chars().take(100).collect::<String>()),
+                    )
+                    .child(
+                        div().flex().flex_row().gap_2().mt_2().child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.accent)
+                                .cursor_pointer()
+                                .child("Delete")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener({
+                                        let id = id.clone();
+                                        move |this, _, _, cx| {
+                                            this.shell.delete_artifact(&id).ok();
+                                            cx.notify();
+                                        }
+                                    }),
+                                ),
+                        ),
+                    ),
+            );
+        }
+
+        div()
+            .w(px(320.0))
+            .h_full()
+            .bg(theme.sidebar_background)
+            .border_l_1()
+            .border_color(theme.border_subtle)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight(600.))
+                            .child("Artifacts"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .cursor_pointer()
+                            .child("Close")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.artifacts_panel_open = false;
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+            )
+            .child(list)
+    }
 }
 
 impl Render for RoninWindow {
@@ -1773,6 +1941,10 @@ impl Render for RoninWindow {
 
         if self.memories_panel_open {
             ui = ui.child(self.render_memories_panel(&theme, cx));
+        }
+
+        if self.artifacts_panel_open {
+            ui = ui.child(self.render_artifacts_panel(&theme, cx));
         }
 
         let mut needs_frame = streaming_active || composer_focused;

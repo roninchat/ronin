@@ -657,6 +657,31 @@ impl RoninDb {
         Ok(artifacts)
     }
 
+    /// Lists all artifacts across all threads, newest first.
+    pub fn list_all_artifacts(&self) -> Result<Vec<DbArtifact>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, thread_id, message_id, title, content, created_at FROM artifacts ORDER BY created_at DESC, id DESC")
+            .map_err(RoninDbError::ListArtifacts)?;
+
+        let artifacts = stmt
+            .query_map([], |row| {
+                Ok(DbArtifact {
+                    id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    message_id: row.get(2)?,
+                    title: row.get(3)?,
+                    content: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })
+            .map_err(RoninDbError::ListArtifacts)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(RoninDbError::ListArtifacts)?;
+
+        Ok(artifacts)
+    }
+
     /// Deletes an artifact by ID.
     pub fn delete_artifact(&self, id: &str) -> Result<()> {
         self.conn
