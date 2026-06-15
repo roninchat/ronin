@@ -954,4 +954,24 @@ impl RoninShell {
         );
         Ok(())
     }
+
+    /// Creates a new memory with the given title and content.
+    pub fn create_memory(&self, title: &str, content: &str) -> Result<ronin_core::Memory> {
+        self.session.create_memory(title, content).map_err(Into::into)
+    }
+
+    /// Lists all memories.
+    pub fn list_memories(&self) -> Result<Vec<ronin_core::Memory>> {
+        self.session.list_memories().map_err(Into::into)
+    }
+
+    /// Deletes a memory by ID.
+    pub fn delete_memory(&self, id: &ronin_core::MemoryId) -> Result<()> {
+        self.session.delete_memory(id).map_err(Into::into)
+    }
+
+    /// Updates a memory by ID.
+    pub fn update_memory(&self, id: &ronin_core::MemoryId, title: &str, content: &str) -> Result<()> {
+        self.session.update_memory(id, title, content).map_err(Into::into)
+    }
 }

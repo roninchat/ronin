@@ -72,6 +72,7 @@ fn run() -> Result<(), RunError> {
                         },
                         needs_initial_focus: true,
                         copied_state: None,
+                        memories_panel_open: false,
                         parsed_messages: std::collections::HashMap::new(),
                         completion_index: 0,
                         pending_clipboard_read: None,
@@ -115,6 +116,7 @@ struct RoninWindow {
     chat_provider: Option<HttpOllamaProvider>,
     needs_initial_focus: bool,
     copied_state: Option<(String, std::time::Instant)>,
+    memories_panel_open: bool,
     parsed_messages:
         std::collections::HashMap<String, (usize, Vec<ronin::markdown::MarkdownBlock>)>,
     completion_index: usize,
@@ -152,6 +154,17 @@ impl RoninWindow {
                         Err(e) => self
                             .attachment_errors
                             .push(format!("failed to read clipboard: {e}")),
+                    }
+                }
+                ContextToolRef::Memory(id) => {
+                    if let Ok(mems) = self.shell.list_memories() {
+                        if let Some(m) = mems.into_iter().find(|m| m.id.0 == id) {
+                            attachments.push(ronin_core::memory_attachment(&m));
+                        } else {
+                            self.attachment_errors.push(format!("Memory not found: {id}"));
+                        }
+                    } else {
+                        self.attachment_errors.push(format!("Failed to list memories for {id}"));
                     }
                 }
             }
@@ -247,6 +260,7 @@ impl RoninWindow {
                     .unwrap_or(path.as_str())
                     .to_string(),
                 ContextToolRef::Clipboard => "clipboard".to_string(),
+                ContextToolRef::Memory(id) => format!("memory:{}", id),
             }
         }));
         labels
@@ -275,11 +289,38 @@ impl RoninWindow {
         let tl = token.to_ascii_lowercase();
         [
             ("@file:", "Attach file"),
+            ("@memory:", "Attach memory"),
             ("@clipboard", "Attach clipboard"),
         ]
         .iter()
         .find(|(c, _)| c.to_ascii_lowercase().starts_with(&tl) && *c != tl)
         .map(|(c, l)| (c.to_string(), l.to_string(), ts, cursor))
+    }
+
+    fn memory_completions(&self) -> Vec<(String, String)> {
+        let cursor = self.composer.cursor();
+        let text = self.composer.text();
+        let ts = text[..cursor]
+            .rfind(char::is_whitespace)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let token = &text[ts..cursor];
+        let prefix = match token.strip_prefix("@memory:") {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
+
+        let memories = self.shell.list_memories().unwrap_or_default();
+        let mut matches: Vec<(String, String)> = memories
+            .into_iter()
+            .filter(|m| {
+                m.id.0.starts_with(prefix)
+                    || m.title.to_lowercase().contains(&prefix.to_lowercase())
+            })
+            .map(|m| (m.id.0, m.title))
+            .collect();
+        matches.truncate(8);
+        matches
     }
 
     fn file_path_completions(&self) -> Vec<String> {
@@ -415,6 +456,24 @@ impl RoninWindow {
             self.completion_index = 0;
             return true;
         }
+
+        let mem_completions = self.memory_completions();
+        if !mem_completions.is_empty() {
+            let idx = self.completion_index.min(mem_completions.len() - 1);
+            let (chosen_id, _) = &mem_completions[idx];
+            let cursor = self.composer.cursor();
+            let text = self.composer.text();
+            let ts = text[..cursor]
+                .rfind(char::is_whitespace)
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            
+            let replacement = format!("@memory:{chosen_id} ");
+            self.composer.replace_range(ts, cursor, &replacement);
+            self.completion_index = 0;
+            return true;
+        }
+
         let completions = self.file_path_completions();
         if completions.is_empty() {
             self.completion_index = 0;
@@ -670,6 +729,17 @@ impl RoninWindow {
         cx.notify();
     }
 
+    fn save_as_memory(&mut self, text: String, cx: &mut Context<Self>) {
+        let title: String = text.chars().take(60).collect();
+        let content = text;
+        if let Err(e) = self.shell.create_memory(&title, &content) {
+            tracing::error!(%e, "failed to save memory");
+        } else {
+            self.memories_panel_open = true;
+            cx.notify();
+        }
+    }
+
     fn on_global_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -835,6 +905,21 @@ impl RoninWindow {
                     .child("New Chat")
                     .hover(|style| style.bg(theme.accent_hover).cursor_pointer())
                     .on_mouse_up(MouseButton::Left, on_new_chat),
+            )
+            .child(
+                div()
+                    .rounded_lg()
+                    .px_3()
+                    .py_2()
+                    .bg(theme.surface_muted)
+                    .text_color(theme.text_primary)
+                    .font_weight(FontWeight(500.))
+                    .child("Memories")
+                    .hover(|style| style.bg(theme.surface_hover).cursor_pointer())
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                        this.memories_panel_open = !this.memories_panel_open;
+                        cx.notify();
+                    })),
             )
             .child(
                 div()
@@ -1104,6 +1189,22 @@ impl RoninWindow {
                             }
                         }),
                     ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.accent)
+                    .cursor_pointer()
+                    .child("Save as memory")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener({
+                            let raw_content = raw_content.clone();
+                            move |this, _, _, cx| {
+                                this.save_as_memory(raw_content.clone(), cx);
+                            }
+                        }),
+                    ),
             );
 
             if msg.role == MessageRole::Assistant
@@ -1300,6 +1401,50 @@ impl RoninWindow {
             );
         }
 
+        // memory completions dropdown
+        let mem_matches = self.memory_completions();
+        if !mem_matches.is_empty() {
+            let ci = self
+                .completion_index
+                .min(mem_matches.len().saturating_sub(1));
+            let mut dropdown = div()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border_subtle)
+                .bg(theme.surface_muted)
+                .flex()
+                .flex_col()
+                .overflow_hidden();
+            for (i, (id, title)) in mem_matches.iter().enumerate() {
+                let bg = if i == ci {
+                    theme.surface_selected
+                } else {
+                    theme.surface_muted
+                };
+                let mut entry = div()
+                    .px_3()
+                    .py_1()
+                    .text_sm()
+                    .text_color(theme.text_primary)
+                    .bg(bg)
+                    .hover(|style| style.bg(theme.surface_hover).cursor_pointer())
+                    .child(format!("{title} ({id})"));
+                if i == ci {
+                    entry = entry.bg(theme.surface_selected);
+                }
+                entry = entry.on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.completion_index = i;
+                        this.accept_command_completion();
+                        cx.notify();
+                    }),
+                );
+                dropdown = dropdown.child(entry);
+            }
+            composer = composer.child(dropdown);
+        }
+
         // file path completions dropdown
         let file_matches = self.file_path_completions();
         if !file_matches.is_empty() {
@@ -1409,6 +1554,83 @@ impl RoninWindow {
                 ),
         )
     }
+
+    fn render_memories_panel(&mut self, theme: &M0Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let memories = self.shell.list_memories().unwrap_or_default();
+        
+        let mut list = div().flex().flex_col().gap_2().id("memories-list").overflow_y_scroll().w_full().h_full();
+        for mem in memories {
+            let id = mem.id.clone();
+            list = list.child(
+                div()
+                    .p_3()
+                    .bg(theme.surface_hover)
+                    .rounded_md()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().font_weight(FontWeight(600.)).child(mem.title))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.text_muted)
+                            .child(mem.content.chars().take(100).collect::<String>()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .mt_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.accent)
+                                    .cursor_pointer()
+                                    .child("Delete")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener({
+                                            let id = id.clone();
+                                            move |this, _, _, cx| {
+                                                this.shell.delete_memory(&id).ok();
+                                                cx.notify();
+                                            }
+                                        }),
+                                    ),
+                            ),
+                    ),
+            );
+        }
+
+        div()
+            .w(px(320.0))
+            .h_full()
+            .bg(theme.sidebar_background)
+            .border_l_1()
+            .border_color(theme.border_subtle)
+            .p_4()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .child(div().text_xl().font_weight(FontWeight(600.)).child("Memories"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .cursor_pointer()
+                            .child("Close")
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                this.memories_panel_open = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(list)
+    }
 }
 
 impl Render for RoninWindow {
@@ -1458,7 +1680,7 @@ impl Render for RoninWindow {
         let messages = self.render_messages(&theme, cx);
         let composer = self.render_composer(&theme, composer_focused, cx);
 
-        let ui = div()
+        let mut ui = div()
             .size_full()
             .flex()
             .bg(theme.app_background)
@@ -1483,6 +1705,10 @@ impl Render for RoninWindow {
                     .child(messages)
                     .child(composer),
             );
+
+        if self.memories_panel_open {
+            ui = ui.child(self.render_memories_panel(&theme, cx));
+        }
 
         let mut needs_frame = streaming_active || composer_focused;
         if let Some((_, time)) = self.copied_state.as_ref() {
