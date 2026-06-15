@@ -168,6 +168,10 @@ pub enum RoninDbError {
     /// Memories could not be listed.
     #[error("failed to list memories")]
     ListMemories(#[source] rusqlite::Error),
+    /// A memory could not be updated.
+    #[error("failed to update memory")]
+    UpdateMemory(#[source] rusqlite::Error),
+
     /// A memory could not be deleted.
     #[error("failed to delete memory")]
     DeleteMemory(#[source] rusqlite::Error),
@@ -685,6 +689,18 @@ impl RoninDb {
             .map_err(RoninDbError::ListMemories)?;
 
         Ok(memories)
+    }
+
+    /// Updates a memory by ID.
+    pub fn update_memory(&self, id: &str, title: &str, content: &str) -> Result<()> {
+        let now = unix_timestamp_millis();
+        self.conn
+            .execute(
+                "UPDATE memories SET title = ?2, content = ?3, updated_at = ?4 WHERE id = ?1",
+                params![id, title, content, now],
+            )
+            .map_err(RoninDbError::UpdateMemory)?;
+        Ok(())
     }
 
     /// Deletes a memory by ID.

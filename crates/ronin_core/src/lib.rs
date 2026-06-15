@@ -56,6 +56,8 @@ pub struct ChatMessage {
 pub enum ContextToolRef {
     /// User requested a file attachment by path.
     File(String),
+    /// User requested a memory attachment by id.
+    Memory(String),
     /// User requested current clipboard text.
     Clipboard,
 }
@@ -84,6 +86,15 @@ pub fn parse_context_tools(input: &str) -> ParsedContextTools {
             if !path.is_empty() {
                 refs.push(ContextToolRef::File(path));
                 rest = &candidate["@file:".len() + consumed..];
+                continue;
+            }
+        }
+
+        if let Some(after_memory) = candidate.strip_prefix("@memory:") {
+            let (id, consumed) = parse_file_ref(after_memory);
+            if !id.is_empty() {
+                refs.push(ContextToolRef::Memory(id));
+                rest = &candidate["@memory:".len() + consumed..];
                 continue;
             }
         }
@@ -275,6 +286,19 @@ pub fn clipboard_attachment(text: &str) -> ContextAttachmentDraft {
         path: None,
         context_block: format!("[Clipboard content]\n{text}"),
         size_bytes: Some(text.len() as u64),
+    }
+}
+
+/// Builds a memory context attachment from a memory object.
+pub fn memory_attachment(memory: &Memory) -> ContextAttachmentDraft {
+    ContextAttachmentDraft {
+        kind: AttachmentKind::Memory,
+        name: format!("memory:{}", memory.title),
+        mime_type: "text/plain".to_string(),
+        content: Some(memory.content.clone()),
+        path: None,
+        context_block: format!("[Memory: {}]\n{}", memory.title, memory.content),
+        size_bytes: Some(memory.content.len() as u64),
     }
 }
 
@@ -855,6 +879,8 @@ pub enum AttachmentKind {
     File,
     /// A pasted clipboard attachment.
     Clipboard,
+    /// A memory attachment.
+    Memory,
 }
 
 /// A persisted artifact linked to a specific message.
@@ -1135,6 +1161,13 @@ impl RoninSession {
             .map_err(Into::into)
     }
 
+    /// Updates a memory.
+    pub fn update_memory(&self, id: &MemoryId, title: &str, content: &str) -> Result<()> {
+        self.db
+            .update_memory(&id.0, title, content)
+            .map_err(Into::into)
+    }
+
     /// Deletes a memory.
     pub fn delete_memory(&self, id: &MemoryId) -> Result<()> {
         self.db.delete_memory(&id.0).map_err(Into::into)
@@ -1153,6 +1186,7 @@ impl RoninSession {
         let db_kind = match kind {
             AttachmentKind::File => "file",
             AttachmentKind::Clipboard => "clipboard",
+            AttachmentKind::Memory => "memory",
         };
         self.db
             .create_attachment(message_id, db_kind, name, mime_type, content, path)
@@ -1242,6 +1276,7 @@ impl From<DbAttachment> for Attachment {
             message_id: attachment.message_id,
             kind: match attachment.kind.as_str() {
                 "clipboard" => AttachmentKind::Clipboard,
+                "memory" => AttachmentKind::Memory,
                 _ => AttachmentKind::File,
             },
             name: attachment.name,

@@ -33,7 +33,15 @@ fn memory_crud_round_trip() {
     assert_eq!(memories.len(), 1);
     assert_eq!(memories[0], memory);
 
-    // 4. Delete
+    // 4. Update
+    db.update_memory(&memory.id, "New Title", "New Content")
+        .expect("update memory");
+    let fetched_after_update = db.get_memory(&memory.id).expect("get memory").unwrap();
+    assert_eq!(fetched_after_update.title, "New Title");
+    assert_eq!(fetched_after_update.content, "New Content");
+    assert!(fetched_after_update.updated_at >= memory.updated_at);
+
+    // 5. Delete
     db.delete_memory(&memory.id).expect("delete memory");
     let fetched_after_delete = db.get_memory(&memory.id).expect("get memory after delete");
     assert!(fetched_after_delete.is_none());
