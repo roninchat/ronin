@@ -1,5 +1,5 @@
 use ronin_app::{ProviderStatus, RoninShell, VisualReuseDecision};
-use ronin_core::{OllamaHealth, OllamaProvider, RoninPaths, RoninSession, MessageRole};
+use ronin_core::{MessageRole, OllamaHealth, OllamaProvider, RoninPaths, RoninSession};
 use tempfile::TempDir;
 
 #[test]
@@ -434,7 +434,11 @@ fn shell_artifact_crud() {
     };
     let shell = RoninShell::open(paths).expect("open shell");
 
-    let thread_id = shell.state().selected_thread_id.clone().expect("selected thread");
+    let thread_id = shell
+        .state()
+        .selected_thread_id
+        .clone()
+        .expect("selected thread");
     let msg = shell
         .session()
         .create_message(&thread_id, MessageRole::User, "hello")
@@ -453,7 +457,9 @@ fn shell_artifact_crud() {
     assert_eq!(all[0].id, artifact.id);
 
     // Delete
-    shell.delete_artifact(&artifact.id).expect("delete artifact");
+    shell
+        .delete_artifact(&artifact.id)
+        .expect("delete artifact");
     let after = shell.list_all_artifacts().expect("list after delete");
     assert!(after.is_empty());
 }

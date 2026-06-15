@@ -2,10 +2,12 @@
 
 //! Public application/session boundary for Ronin.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 use ronin_db::{
     init_tracing, DbArtifact, DbAttachment, DbMemory, DbMessage, DbThread, RoninDb, RoninDbError,
@@ -33,6 +35,118 @@ pub trait OllamaProvider {
     fn check_health(&self) -> OllamaHealth;
     /// Lists available model names from the provider.
     fn list_models(&self) -> Result<Vec<String>>;
+}
+
+/// Cached list of models for a provider.
+#[derive(Debug, Clone)]
+pub struct CachedModels {
+    /// List of model names.
+    pub models: Vec<String>,
+    /// Time when the models were fetched.
+    pub fetched_at: Instant,
+    /// Time-to-live duration for the cache.
+    pub ttl: Duration,
+    /// Whether a background fetch is currently in progress.
+    pub is_fetching: bool,
+}
+
+static MODEL_CACHE: std::sync::OnceLock<RwLock<HashMap<String, CachedModels>>> =
+    std::sync::OnceLock::new();
+
+/// Returns a reference to the global model cache.
+pub fn get_model_cache() -> &'static RwLock<HashMap<String, CachedModels>> {
+    MODEL_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Clears the model list cache for the given provider.
+pub fn clear_model_cache(provider_name: &str) {
+    if let Some(lock) = MODEL_CACHE.get() {
+        let mut cache = lock.blocking_write();
+        cache.remove(provider_name);
+    }
+}
+
+/// Helper to get cached models or fetch them using a closure.
+pub fn get_cached_models<F>(
+    provider_name: &str,
+    stale_threshold: Duration,
+    ttl: Duration,
+    fetch_fn: F,
+) -> Result<Vec<String>>
+where
+    F: Fn() -> Result<Vec<String>> + Send + Sync + 'static,
+{
+    let provider_key = provider_name.to_string();
+
+    // 1. Read lock check (fast path)
+    {
+        let cache = get_model_cache().blocking_read();
+        if let Some(cached) = cache.get(&provider_key) {
+            let elapsed = cached.fetched_at.elapsed();
+            if elapsed < stale_threshold {
+                return Ok(cached.models.clone());
+            }
+        }
+    }
+
+    // 2. Write lock check for stale / expired / miss
+    let mut cache = get_model_cache().blocking_write();
+    if let Some(cached) = cache.get_mut(&provider_key) {
+        let elapsed = cached.fetched_at.elapsed();
+        if elapsed < stale_threshold {
+            return Ok(cached.models.clone());
+        } else if elapsed < ttl {
+            // Stale but not expired. Spawn background refresh.
+            if !cached.is_fetching {
+                cached.is_fetching = true;
+                let provider_key_clone = provider_key.clone();
+                std::thread::spawn(move || match fetch_fn() {
+                    Ok(fresh_models) => {
+                        let mut cache = get_model_cache().blocking_write();
+                        cache.insert(
+                            provider_key_clone,
+                            CachedModels {
+                                models: fresh_models,
+                                fetched_at: Instant::now(),
+                                ttl,
+                                is_fetching: false,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        let mut cache = get_model_cache().blocking_write();
+                        if let Some(cached) = cache.get_mut(&provider_key_clone) {
+                            cached.is_fetching = false;
+                        }
+                        tracing::warn!(
+                            "Background refresh failed for {}: {:?}",
+                            provider_key_clone,
+                            e
+                        );
+                    }
+                });
+            }
+            return Ok(cached.models.clone());
+        }
+    }
+
+    // 3. Expired or Miss. Do blocking fetch.
+    drop(cache);
+
+    let fresh_models = fetch_fn()?;
+
+    let mut cache = get_model_cache().blocking_write();
+    cache.insert(
+        provider_key,
+        CachedModels {
+            models: fresh_models.clone(),
+            fetched_at: Instant::now(),
+            ttl,
+            is_fetching: false,
+        },
+    );
+
+    Ok(fresh_models)
 }
 
 /// A request to send to a chat provider.
@@ -380,6 +494,7 @@ System: "[TOOL_RESULT: get_memory, result: "Prefers tea over coffee"]"
 You: "No, according to your preferences, you prefer tea over coffee.""#;
 
 /// HTTP-based Ollama provider that queries the Ollama REST API.
+#[derive(Clone)]
 pub struct HttpOllamaProvider {
     base_url: String,
 }
@@ -499,23 +614,8 @@ impl ChatProvider for HttpOllamaProvider {
     }
 }
 
-impl OllamaProvider for HttpOllamaProvider {
-    fn check_health(&self) -> OllamaHealth {
-        let client = match reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(3))
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return OllamaHealth::Offline,
-        };
-
-        match client.get(format!("{}/api/version", self.base_url)).send() {
-            Ok(resp) if resp.status().is_success() => OllamaHealth::Online,
-            _ => OllamaHealth::Offline,
-        }
-    }
-
-    fn list_models(&self) -> Result<Vec<String>> {
+impl HttpOllamaProvider {
+    fn fetch_models_raw(&self) -> Result<Vec<String>> {
         #[derive(serde::Deserialize)]
         struct ModelEntry {
             name: String,
@@ -542,7 +642,44 @@ impl OllamaProvider for HttpOllamaProvider {
     }
 }
 
+impl OllamaProvider for HttpOllamaProvider {
+    fn check_health(&self) -> OllamaHealth {
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => {
+                clear_model_cache(self.name());
+                return OllamaHealth::Offline;
+            }
+        };
+
+        let health = match client.get(format!("{}/api/version", self.base_url)).send() {
+            Ok(resp) if resp.status().is_success() => OllamaHealth::Online,
+            _ => OllamaHealth::Offline,
+        };
+
+        if health == OllamaHealth::Offline {
+            clear_model_cache(self.name());
+        }
+
+        health
+    }
+
+    fn list_models(&self) -> Result<Vec<String>> {
+        let provider = self.clone();
+        get_cached_models(
+            self.name(),
+            Duration::from_secs(240),
+            Duration::from_secs(300),
+            move || provider.fetch_models_raw(),
+        )
+    }
+}
+
 /// OpenAI-compatible provider that queries a remote API.
+#[derive(Clone)]
 pub struct OpenAiCompatibleProvider {
     base_url: String,
     client: reqwest::blocking::Client,
@@ -742,30 +879,8 @@ impl ChatProvider for OpenAiCompatibleProvider {
     }
 }
 
-impl OllamaProvider for OpenAiCompatibleProvider {
-    fn name(&self) -> &'static str {
-        "openai"
-    }
-
-    fn check_health(&self) -> OllamaHealth {
-        let key = match self.get_api_key() {
-            Ok(k) => k,
-            Err(_) => return OllamaHealth::Offline,
-        };
-
-        match self
-            .client
-            .get(format!("{}/models", self.base_url))
-            .header("Authorization", format!("Bearer {}", key))
-            .timeout(std::time::Duration::from_secs(3))
-            .send()
-        {
-            Ok(resp) if resp.status().is_success() => OllamaHealth::Online,
-            _ => OllamaHealth::Offline,
-        }
-    }
-
-    fn list_models(&self) -> Result<Vec<String>> {
+impl OpenAiCompatibleProvider {
+    fn fetch_models_raw(&self) -> Result<Vec<String>> {
         #[derive(serde::Deserialize)]
         struct ModelEntry {
             id: String,
@@ -789,6 +904,49 @@ impl OllamaProvider for OpenAiCompatibleProvider {
             .map_err(|source| RoninError::Provider(source.to_string()))?;
 
         Ok(resp.data.into_iter().map(|m| m.id).collect())
+    }
+}
+
+impl OllamaProvider for OpenAiCompatibleProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+
+    fn check_health(&self) -> OllamaHealth {
+        let key = match self.get_api_key() {
+            Ok(k) => k,
+            Err(_) => {
+                clear_model_cache(self.name());
+                return OllamaHealth::Offline;
+            }
+        };
+
+        let health = match self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .header("Authorization", format!("Bearer {}", key))
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+        {
+            Ok(resp) if resp.status().is_success() => OllamaHealth::Online,
+            _ => OllamaHealth::Offline,
+        };
+
+        if health == OllamaHealth::Offline {
+            clear_model_cache(self.name());
+        }
+
+        health
+    }
+
+    fn list_models(&self) -> Result<Vec<String>> {
+        let provider = self.clone();
+        get_cached_models(
+            self.name(),
+            Duration::from_secs(240),
+            Duration::from_secs(300),
+            move || provider.fetch_models_raw(),
+        )
     }
 }
 

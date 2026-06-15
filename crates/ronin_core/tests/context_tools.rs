@@ -1,4 +1,7 @@
-use ronin_core::{artifact_attachment, parse_context_tools, read_file_attachment, Artifact, ArtifactId, AttachmentKind, ContextToolError, ContextToolRef};
+use ronin_core::{
+    artifact_attachment, parse_context_tools, read_file_attachment, Artifact, ArtifactId,
+    AttachmentKind, ContextToolError, ContextToolRef,
+};
 use tempfile::TempDir;
 
 #[test]
