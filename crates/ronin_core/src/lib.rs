@@ -62,6 +62,8 @@ pub enum ContextToolRef {
     File(String),
     /// User requested a memory attachment by id.
     Memory(String),
+    /// User requested an artifact attachment by id.
+    Artifact(String),
     /// User requested current clipboard text.
     Clipboard,
 }
@@ -103,6 +105,15 @@ pub fn parse_context_tools(input: &str) -> ParsedContextTools {
             }
         }
 
+        if let Some(after_artifact) = candidate.strip_prefix("@artifact:") {
+            let (id, consumed) = parse_file_ref(after_artifact);
+            if !id.is_empty() {
+                refs.push(ContextToolRef::Artifact(id));
+                rest = &candidate["@artifact:".len() + consumed..];
+                continue;
+            }
+        }
+
         if candidate.len() >= "@clipboard".len()
             && candidate[.."@clipboard".len()].eq_ignore_ascii_case("@clipboard")
             && is_ref_boundary(candidate["@clipboard".len()..].chars().next())
@@ -128,6 +139,8 @@ fn find_next_context_ref(input: &str) -> Option<usize> {
     input.match_indices('@').find_map(|(idx, _)| {
         let candidate = &input[idx..];
         if candidate.starts_with("@file:")
+            || candidate.starts_with("@memory:")
+            || candidate.starts_with("@artifact:")
             || candidate
                 .get(.."@clipboard".len())
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case("@clipboard"))
@@ -303,6 +316,19 @@ pub fn memory_attachment(memory: &Memory) -> ContextAttachmentDraft {
         path: None,
         context_block: format!("[Memory: {}]\n{}", memory.title, memory.content),
         size_bytes: Some(memory.content.len() as u64),
+    }
+}
+
+/// Builds an artifact context attachment from an artifact object.
+pub fn artifact_attachment(artifact: &Artifact) -> ContextAttachmentDraft {
+    ContextAttachmentDraft {
+        kind: AttachmentKind::Artifact,
+        name: format!("artifact:{}", artifact.title),
+        mime_type: "text/plain".to_string(),
+        content: Some(artifact.content.clone()),
+        path: None,
+        context_block: format!("[Artifact: {}]\n{}", artifact.title, artifact.content),
+        size_bytes: Some(artifact.content.len() as u64),
     }
 }
 
@@ -945,6 +971,8 @@ pub enum AttachmentKind {
     Clipboard,
     /// A memory attachment.
     Memory,
+    /// An artifact attachment.
+    Artifact,
 }
 
 /// A persisted artifact linked to a specific message.
@@ -1206,6 +1234,14 @@ impl RoninSession {
             .map_err(Into::into)
     }
 
+    /// Lists all artifacts across all threads, newest first.
+    pub fn list_all_artifacts(&self) -> Result<Vec<Artifact>> {
+        self.db
+            .list_all_artifacts()
+            .map(|artifacts| artifacts.into_iter().map(Artifact::from).collect())
+            .map_err(Into::into)
+    }
+
     /// Deletes an artifact.
     pub fn delete_artifact(&self, id: &ArtifactId) -> Result<()> {
         self.db.delete_artifact(&id.0).map_err(Into::into)
@@ -1253,6 +1289,7 @@ impl RoninSession {
             AttachmentKind::File => "file",
             AttachmentKind::Clipboard => "clipboard",
             AttachmentKind::Memory => "memory",
+            AttachmentKind::Artifact => "artifact",
         };
         self.db
             .create_attachment(message_id, db_kind, name, mime_type, content, path)

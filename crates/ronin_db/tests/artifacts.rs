@@ -46,3 +46,32 @@ fn artifact_crud_round_trip() {
         .expect("get artifact after delete");
     assert!(fetched_after_delete.is_none());
 }
+
+#[test]
+fn list_all_artifacts_should_return_artifacts_across_threads_newest_first() {
+    let (db, _temp) = open_test_db();
+
+    let thread1 = db.create_thread().expect("create thread 1");
+    let msg1 = db
+        .create_message(&thread1.id, "user", "hello", "complete")
+        .expect("create message 1");
+
+    let thread2 = db.create_thread().expect("create thread 2");
+    let msg2 = db
+        .create_message(&thread2.id, "user", "world", "complete")
+        .expect("create message 2");
+
+    // Create artifacts — second one is older
+    let art1 = db
+        .create_artifact(&thread1.id, &msg1.id, "Artifact from thread 1", "content 1")
+        .expect("create artifact 1");
+    let art2 = db
+        .create_artifact(&thread2.id, &msg2.id, "Artifact from thread 2", "content 2")
+        .expect("create artifact 2");
+
+    let all = db.list_all_artifacts().expect("list all artifacts");
+    assert_eq!(all.len(), 2, "should return artifacts from both threads");
+    // newest first (art2 was created after art1)
+    assert_eq!(all[0].id, art2.id);
+    assert_eq!(all[1].id, art1.id);
+}

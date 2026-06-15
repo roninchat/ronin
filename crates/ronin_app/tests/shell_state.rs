@@ -1,5 +1,5 @@
 use ronin_app::{ProviderStatus, RoninShell, VisualReuseDecision};
-use ronin_core::{OllamaHealth, OllamaProvider, RoninPaths, RoninSession};
+use ronin_core::{OllamaHealth, OllamaProvider, RoninPaths, RoninSession, MessageRole};
 use tempfile::TempDir;
 
 #[test]
@@ -423,4 +423,37 @@ default_model = "gpt-4o"
         shell.state().provider_status,
         ProviderStatus::OpenAiNotConfigured
     );
+}
+
+#[test]
+fn shell_artifact_crud() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+    let shell = RoninShell::open(paths).expect("open shell");
+
+    let thread_id = shell.state().selected_thread_id.clone().expect("selected thread");
+    let msg = shell
+        .session()
+        .create_message(&thread_id, MessageRole::User, "hello")
+        .expect("create message");
+
+    // Create
+    let artifact = shell
+        .create_artifact(&thread_id, &msg.id, "My Artifact", "content")
+        .expect("create artifact");
+    assert_eq!(artifact.title, "My Artifact");
+    assert_eq!(artifact.content, "content");
+
+    // List all
+    let all = shell.list_all_artifacts().expect("list all artifacts");
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].id, artifact.id);
+
+    // Delete
+    shell.delete_artifact(&artifact.id).expect("delete artifact");
+    let after = shell.list_all_artifacts().expect("list after delete");
+    assert!(after.is_empty());
 }
