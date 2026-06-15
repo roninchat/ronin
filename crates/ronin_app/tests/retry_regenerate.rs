@@ -44,7 +44,12 @@ fn retry_message_should_create_new_user_message_and_stream() {
     };
 
     shell
-        .begin_streaming(&thread_id, Some("Hello"), Box::new(fail_provider), "test-model")
+        .begin_streaming(
+            &thread_id,
+            Some("Hello"),
+            Box::new(fail_provider),
+            "test-model",
+        )
         .expect("begin streaming");
 
     thread::sleep(Duration::from_millis(100));

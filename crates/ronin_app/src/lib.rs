@@ -5,8 +5,8 @@
 use std::sync::mpsc;
 
 use ronin_core::{
-    ChatProvider, ChatRequest, ChatStreamEvent, Message, MessageRole, MessageStatus, OllamaHealth,
-    OllamaProvider, RoninError, RoninPaths, RoninSession, Thread,
+    ChatProvider, ChatRequest, ChatStreamEvent, ContextAttachmentDraft, Message, MessageRole,
+    MessageStatus, OllamaHealth, OllamaProvider, RoninError, RoninPaths, RoninSession, Thread,
 };
 
 /// Result type returned by `ronin_app` operations.
@@ -113,6 +113,53 @@ fn derive_thread_title(prompt: &str) -> String {
         let mut truncated = collapsed.chars().take(57).collect::<String>();
         truncated.push_str("...");
         truncated
+    }
+}
+
+fn persist_context_attachments(
+    session: &RoninSession,
+    message_id: &str,
+    attachments: &[ContextAttachmentDraft],
+) -> Result<()> {
+    for attachment in attachments {
+        let path = attachment
+            .path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        session.create_attachment(
+            message_id,
+            attachment.kind,
+            &attachment.name,
+            &attachment.mime_type,
+            attachment.content.as_deref(),
+            path.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+fn attachment_context_block(attachments: &[ContextAttachmentDraft]) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
+    }
+
+    Some(
+        attachments
+            .iter()
+            .map(|attachment| attachment.context_block.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
+}
+
+fn visible_message_or_attachment_placeholder<'a>(
+    content: &'a str,
+    attachments: &[ContextAttachmentDraft],
+) -> &'a str {
+    if content.trim().is_empty() && !attachments.is_empty() {
+        "See attached context."
+    } else {
+        content
     }
 }
 
@@ -323,8 +370,21 @@ impl RoninShell {
     /// Reloads messages from the session into shell state so the UI reflects
     /// the new message.
     pub fn send_message(&mut self, thread_id: &str, content: &str) -> Result<()> {
-        self.session
-            .create_message(thread_id, ronin_core::MessageRole::User, content)?;
+        self.send_message_with_attachments(thread_id, content, &[])
+    }
+
+    /// Sends a user message and persists explicit attachment metadata without a provider.
+    pub fn send_message_with_attachments(
+        &mut self,
+        thread_id: &str,
+        content: &str,
+        attachments: &[ContextAttachmentDraft],
+    ) -> Result<()> {
+        let content = visible_message_or_attachment_placeholder(content, attachments);
+        let user_msg =
+            self.session
+                .create_message(thread_id, ronin_core::MessageRole::User, content)?;
+        persist_context_attachments(&self.session, &user_msg.id, attachments)?;
 
         // Derive title if thread is still "New Chat".
         let current_title = self
@@ -361,6 +421,18 @@ impl RoninShell {
         provider: Box<dyn ChatProvider + Send>,
         model: &str,
     ) -> Result<()> {
+        self.begin_streaming_with_attachments(thread_id, content, &[], provider, model)
+    }
+
+    /// Begins a streaming provider response with explicit context attachments.
+    pub fn begin_streaming_with_attachments(
+        &mut self,
+        thread_id: &str,
+        content: Option<&str>,
+        attachments: &[ContextAttachmentDraft],
+        provider: Box<dyn ChatProvider + Send>,
+        model: &str,
+    ) -> Result<()> {
         if self.generation_active {
             return Err(RoninAppError::GenerationInProgress);
         }
@@ -368,8 +440,11 @@ impl RoninShell {
 
         // 1. Persist user message and derive title if provided
         if let Some(user_content) = content {
-            self.session
-                .create_message(thread_id, MessageRole::User, user_content)?;
+            let user_content = visible_message_or_attachment_placeholder(user_content, attachments);
+            let user_msg =
+                self.session
+                    .create_message(thread_id, MessageRole::User, user_content)?;
+            persist_context_attachments(&self.session, &user_msg.id, attachments)?;
 
             let current_title = self
                 .state
@@ -422,6 +497,15 @@ impl RoninShell {
             role: "system".to_string(),
             content: ronin_core::RONIN_SYSTEM_PROMPT.to_string(),
         }];
+        if let Some(context) = attachment_context_block(attachments) {
+            if context.chars().count() > MAX_CHARS {
+                self.state.truncation_notice = true;
+            }
+            chat_messages.push(ronin_core::ChatMessage {
+                role: "system".to_string(),
+                content: context,
+            });
+        }
         chat_messages.extend(included.into_iter().map(|m| ronin_core::ChatMessage {
             role: match m.role {
                 MessageRole::User => "user".to_string(),
@@ -616,7 +700,28 @@ impl RoninShell {
         }
         self.generation_active = true;
 
-        let result = self.send_message_with_provider_inner(thread_id, content, provider, model);
+        let result =
+            self.send_message_with_provider_inner(thread_id, content, &[], provider, model);
+        self.generation_active = false;
+        result
+    }
+
+    /// Sends a user message with explicit context attachments and streams a provider response.
+    pub fn send_message_with_provider_and_attachments(
+        &mut self,
+        thread_id: &str,
+        content: &str,
+        attachments: &[ContextAttachmentDraft],
+        provider: &dyn ChatProvider,
+        model: &str,
+    ) -> Result<()> {
+        if self.generation_active {
+            return Err(RoninAppError::GenerationInProgress);
+        }
+        self.generation_active = true;
+
+        let result =
+            self.send_message_with_provider_inner(thread_id, content, attachments, provider, model);
         self.generation_active = false;
         result
     }
@@ -717,13 +822,16 @@ impl RoninShell {
         &mut self,
         thread_id: &str,
         content: &str,
+        attachments: &[ContextAttachmentDraft],
         provider: &dyn ChatProvider,
         model: &str,
     ) -> Result<()> {
-        // 1. Persist user message
-        let _user_msg = self
-            .session
-            .create_message(thread_id, MessageRole::User, content)?;
+        // 1. Persist user message and attachment metadata.
+        let content = visible_message_or_attachment_placeholder(content, attachments);
+        let user_msg =
+            self.session
+                .create_message(thread_id, ronin_core::MessageRole::User, content)?;
+        persist_context_attachments(&self.session, &user_msg.id, attachments)?;
 
         // 2. Derive title if still "New Chat"
         let current_title = self
@@ -775,6 +883,15 @@ impl RoninShell {
             role: "system".to_string(),
             content: ronin_core::RONIN_SYSTEM_PROMPT.to_string(),
         }];
+        if let Some(context) = attachment_context_block(attachments) {
+            if context.chars().count() > MAX_CHARS {
+                self.state.truncation_notice = true;
+            }
+            chat_messages.push(ronin_core::ChatMessage {
+                role: "system".to_string(),
+                content: context,
+            });
+        }
         chat_messages.extend(included.into_iter().map(|m| ronin_core::ChatMessage {
             role: match m.role {
                 MessageRole::User => "user".to_string(),

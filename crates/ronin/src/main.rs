@@ -2,12 +2,17 @@ use std::process::ExitCode;
 
 use gpui::{
     div, prelude::*, px, rgb, size, App, Application, Bounds, Context, FocusHandle, FontWeight,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseUpEvent, SharedString, TitlebarOptions, Window,
-    WindowBounds, WindowOptions,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollHandle,
+    SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
-use ronin::{parse_launch_intent, ronin_paths, LaunchIntent, LauncherError};
+use ronin::{
+    composer::ComposerEditor, parse_launch_intent, ronin_paths, LaunchIntent, LauncherError,
+};
 use ronin_app::{ProviderStatus, RoninAppError, RoninShell, ShellState};
-use ronin_core::{HttpOllamaProvider, MessageRole};
+use ronin_core::{
+    clipboard_attachment, parse_context_tools, read_file_attachment, ContextAttachmentDraft,
+    ContextToolRef, HttpOllamaProvider, MessageRole,
+};
 
 fn main() -> ExitCode {
     match run() {
@@ -22,12 +27,20 @@ fn main() -> ExitCode {
 fn run() -> Result<(), RunError> {
     let intent = parse_launch_intent(std::env::args().skip(1))?;
     let paths = ronin_paths()?;
-    let shell = match intent {
-        LaunchIntent::OpenPersisted => RoninShell::open(paths)?,
-        LaunchIntent::NewThread => RoninShell::open_with_new_thread(paths)?,
-        LaunchIntent::OpenWithOllama => RoninShell::open_with_ollama(paths)?,
+    let attach_paths = match &intent {
+        LaunchIntent::OpenPersisted { attach_paths }
+        | LaunchIntent::NewThread { attach_paths }
+        | LaunchIntent::OpenWithOllama { attach_paths } => attach_paths.clone(),
     };
-    let uses_ollama = matches!(intent, LaunchIntent::OpenWithOllama);
+    let shell = match intent {
+        LaunchIntent::OpenPersisted { .. } if !attach_paths.is_empty() => {
+            RoninShell::open_with_new_thread(paths)?
+        }
+        LaunchIntent::OpenPersisted { .. } => RoninShell::open(paths)?,
+        LaunchIntent::NewThread { .. } => RoninShell::open_with_new_thread(paths)?,
+        LaunchIntent::OpenWithOllama { .. } => RoninShell::open_with_ollama(paths)?,
+    };
+    let uses_ollama = matches!(intent, LaunchIntent::OpenWithOllama { .. });
     tracing::info!(intent = ?intent, "ronin native shell starting");
 
     Application::new().run(move |cx: &mut App| {
@@ -42,18 +55,30 @@ fn run() -> Result<(), RunError> {
                 ..Default::default()
             },
             |_, cx| {
-                cx.new(|cx| RoninWindow {
-                    shell,
-                    composer_text: String::new(),
-                    composer_focus: cx.focus_handle(),
-                    chat_provider: if uses_ollama {
-                        Some(HttpOllamaProvider::new("http://localhost:11434"))
-                    } else {
-                        None
-                    },
-                    needs_initial_focus: true,
-                    copied_state: None,
-                    parsed_messages: std::collections::HashMap::new(),
+                cx.new(|cx| {
+                    let rem = 14.0; // default rem in pixels for GPUI 0.2.x
+                    let mut composer = ComposerEditor::new();
+                    composer.set_font_metrics_from_rem(rem);
+                    RoninWindow {
+                        shell,
+                        composer,
+                        preattached_files: attach_paths.clone(),
+                        attachment_errors: Vec::new(),
+                        composer_focus: cx.focus_handle(),
+                        chat_provider: if uses_ollama {
+                            Some(HttpOllamaProvider::new("http://localhost:11434"))
+                        } else {
+                            None
+                        },
+                        needs_initial_focus: true,
+                        copied_state: None,
+                        parsed_messages: std::collections::HashMap::new(),
+                        completion_index: 0,
+                        pending_clipboard_read: None,
+                        composer_rem: rem,
+                        composer_scroll_handle: ScrollHandle::new(),
+                        blink_start: std::time::Instant::now(),
+                    }
                 })
             },
         );
@@ -83,31 +108,81 @@ enum RunError {
 
 struct RoninWindow {
     shell: RoninShell,
-    composer_text: String,
+    composer: ComposerEditor,
+    preattached_files: Vec<std::path::PathBuf>,
+    attachment_errors: Vec<String>,
     composer_focus: FocusHandle,
     chat_provider: Option<HttpOllamaProvider>,
     needs_initial_focus: bool,
     copied_state: Option<(String, std::time::Instant)>,
     parsed_messages:
         std::collections::HashMap<String, (usize, Vec<ronin::markdown::MarkdownBlock>)>,
+    completion_index: usize,
+    pending_clipboard_read: Option<std::sync::mpsc::Receiver<Result<String, arboard::Error>>>,
+    composer_rem: f32,
+    composer_scroll_handle: ScrollHandle,
+    blink_start: std::time::Instant,
 }
 
 impl RoninWindow {
+    // ── context / attachments ──
+
+    fn resolve_context_attachments(&mut self, text: &str) -> (String, Vec<ContextAttachmentDraft>) {
+        self.attachment_errors.clear();
+        let parsed = parse_context_tools(text);
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let mut attachments = Vec::new();
+
+        for path in &self.preattached_files {
+            match read_file_attachment(path, &cwd) {
+                Ok(a) => attachments.push(a),
+                Err(e) => self.attachment_errors.push(e.to_string()),
+            }
+        }
+
+        for r in parsed.refs {
+            match r {
+                ContextToolRef::File(path) => match read_file_attachment(&path, &cwd) {
+                    Ok(a) => attachments.push(a),
+                    Err(e) => self.attachment_errors.push(e.to_string()),
+                },
+                ContextToolRef::Clipboard => {
+                    match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+                        Ok(t) => attachments.push(clipboard_attachment(&t)),
+                        Err(e) => self
+                            .attachment_errors
+                            .push(format!("failed to read clipboard: {e}")),
+                    }
+                }
+            }
+        }
+
+        (parsed.visible_message, attachments)
+    }
+
     fn send_current_message(&mut self, cx: &mut Context<Self>) {
         let thread_id = match self.shell.state().selected_thread_id.clone() {
             Some(id) => id,
             None => return,
         };
-        let text = std::mem::take(&mut self.composer_text);
-        if text.trim().is_empty() {
+        let text = self.composer.take_text();
+        let (visible_text, attachments) = self.resolve_context_attachments(&text);
+        if visible_text.trim().is_empty() && attachments.is_empty() {
+            self.composer.set_text(text);
             return;
         }
 
         let model = match &self.shell.state().provider_status {
             ProviderStatus::OllamaOnline { model } => model.clone(),
             _ => {
-                if let Err(err) = self.shell.send_message(&thread_id, &text) {
+                if let Err(err) = self.shell.send_message_with_attachments(
+                    &thread_id,
+                    &visible_text,
+                    &attachments,
+                ) {
                     tracing::error!(%err, "failed to send message");
+                } else {
+                    self.preattached_files.clear();
                 }
                 cx.notify();
                 return;
@@ -116,11 +191,16 @@ impl RoninWindow {
 
         match self.chat_provider.take() {
             Some(provider) => {
-                let result =
-                    self.shell
-                        .begin_streaming(&thread_id, Some(&text), Box::new(provider), &model);
+                let result = self.shell.begin_streaming_with_attachments(
+                    &thread_id,
+                    Some(&visible_text),
+                    &attachments,
+                    Box::new(provider),
+                    &model,
+                );
                 match result {
                     Ok(()) => {
+                        self.preattached_files.clear();
                         cx.notify();
                     }
                     Err(err) => {
@@ -132,13 +212,416 @@ impl RoninWindow {
                 }
             }
             None => {
-                if let Err(err) = self.shell.send_message(&thread_id, &text) {
+                if let Err(err) = self.shell.send_message_with_attachments(
+                    &thread_id,
+                    &visible_text,
+                    &attachments,
+                ) {
                     tracing::error!(%err, "failed to send message");
+                } else {
+                    self.preattached_files.clear();
                 }
                 cx.notify();
             }
         }
     }
+
+    fn attachment_pill_labels(&self) -> Vec<String> {
+        let parsed = parse_context_tools(self.composer.text());
+        let mut labels: Vec<String> = self
+            .preattached_files
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("attached file")
+                    .to_string()
+            })
+            .collect();
+
+        labels.extend(parsed.refs.into_iter().map(|r| {
+            match r {
+                ContextToolRef::File(path) => std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path.as_str())
+                    .to_string(),
+                ContextToolRef::Clipboard => "clipboard".to_string(),
+            }
+        }));
+        labels
+    }
+
+    fn remove_preattached_file(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.preattached_files.len() {
+            self.preattached_files.remove(index);
+        }
+        cx.notify();
+    }
+
+    // ── completions ──
+
+    fn command_completion(&self) -> Option<(String, String, usize, usize)> {
+        let cursor = self.composer.cursor();
+        let text = self.composer.text();
+        let ts = text[..cursor]
+            .rfind(char::is_whitespace)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let token = &text[ts..cursor];
+        if !token.starts_with('@') {
+            return None;
+        }
+        let tl = token.to_ascii_lowercase();
+        [
+            ("@file:", "Attach file"),
+            ("@clipboard", "Attach clipboard"),
+        ]
+        .iter()
+        .find(|(c, _)| c.to_ascii_lowercase().starts_with(&tl) && *c != tl)
+        .map(|(c, l)| (c.to_string(), l.to_string(), ts, cursor))
+    }
+
+    fn file_path_completions(&self) -> Vec<String> {
+        let cursor = self.composer.cursor();
+        let text = self.composer.text();
+        let ts = text[..cursor]
+            .rfind(char::is_whitespace)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let token = &text[ts..cursor];
+        let prefix = match token.strip_prefix("@file:") {
+            Some(p) => {
+                if p.starts_with('"') {
+                    p.strip_prefix('"').unwrap().trim_end_matches('"')
+                } else {
+                    p
+                }
+            }
+            None => return Vec::new(),
+        };
+
+        // Normalize: strip trailing / to get dir, extract file name prefix
+        let prefix_path = std::path::Path::new(prefix);
+        let (dir, file_prefix) = if prefix.is_empty() || prefix == "/" {
+            // Empty or just "/" — list root or home
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+            (std::path::PathBuf::from(home), String::new())
+        } else if prefix.ends_with('/') {
+            // Explicit directory — list its contents
+            let d = prefix_path.to_path_buf();
+            if d.is_dir() {
+                (d, String::new())
+            } else {
+                // Try resolving via HOME
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                let full = std::path::PathBuf::from(&home).join(prefix_path);
+                if full.is_dir() {
+                    (full, String::new())
+                } else {
+                    (
+                        full.parent()
+                            .map(|p| p.to_path_buf())
+                            .unwrap_or_else(|| std::path::PathBuf::from(&home)),
+                        full.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    )
+                }
+            }
+        } else if prefix_path.is_dir() {
+            // Path is an existing directory — list its contents
+            (prefix_path.to_path_buf(), String::new())
+        } else {
+            // Path is a partial — get parent dir and file name prefix
+            let parent = prefix_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                    std::path::PathBuf::from(&home)
+                });
+            // If prefix starts with /, resolve absolute; otherwise try relative then HOME fallback
+            let dir = if prefix.starts_with('/') {
+                parent
+            } else if parent.as_os_str().is_empty() {
+                // Just a filename — search cwd first, fallback to HOME
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            } else if parent.is_dir() {
+                parent
+            } else {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                let full = std::path::PathBuf::from(&home).join(&parent);
+                if full.is_dir() {
+                    full
+                } else {
+                    parent
+                }
+            };
+            let fname = prefix_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            (dir, fname)
+        };
+
+        let file_prefix_lower = file_prefix.to_ascii_lowercase();
+
+        let mut matches = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                // Filter . and ..
+                if name == "." || name == ".." {
+                    continue;
+                }
+                // Case-insensitive prefix match
+                let name_lower = name.to_ascii_lowercase();
+                if !file_prefix_lower.is_empty() && !name_lower.starts_with(&file_prefix_lower) {
+                    continue;
+                }
+                let suffix = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    "/"
+                } else {
+                    ""
+                };
+                matches.push(format!("{name}{suffix}"));
+            }
+        }
+        matches.sort_by(|a, b| {
+            // Directories first, then alphabetical
+            let a_dir = a.ends_with('/');
+            let b_dir = b.ends_with('/');
+            b_dir.cmp(&a_dir).then_with(|| a.cmp(b))
+        });
+        matches.truncate(8);
+        matches
+    }
+
+    fn accept_command_completion(&mut self) -> bool {
+        if let Some((command, _, start, end)) = self.command_completion() {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+            let cmd = if command == "@file:" {
+                format!("@file:{home}/")
+            } else {
+                command.to_string()
+            };
+            self.composer.replace_range(start, end, &cmd);
+            if command == "@clipboard" {
+                self.composer.insert_str(" ");
+            }
+            self.completion_index = 0;
+            return true;
+        }
+        let completions = self.file_path_completions();
+        if completions.is_empty() {
+            self.completion_index = 0;
+            return false;
+        }
+        let idx = self.completion_index.min(completions.len() - 1);
+        let chosen = &completions[idx];
+        let cursor = self.composer.cursor();
+        let text = self.composer.text();
+        let ts = text[..cursor]
+            .rfind(char::is_whitespace)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let token = &text[ts..cursor];
+        let prefix = token.strip_prefix("@file:").unwrap_or(token);
+        let quoted = prefix.starts_with('"');
+        let head = if quoted { "@file:\"" } else { "@file:" };
+        let base = prefix
+            .strip_prefix('"')
+            .map(|q| q.trim_end_matches('"'))
+            .unwrap_or(prefix);
+
+        // Build directory prefix: include trailing /
+        let base_path = std::path::Path::new(base);
+        let dir_str = if base.ends_with('/') {
+            // Already has trailing / — keep dir as-is
+            if base == "/" || base.is_empty() {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                format!("{home}/")
+            } else {
+                base.to_string()
+            }
+        } else if base.is_empty() {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+            format!("{home}/")
+        } else if base_path.is_dir() {
+            format!("{base}/")
+        } else {
+            base_path
+                .parent()
+                .and_then(|p| p.to_str())
+                .filter(|d| !d.is_empty())
+                .map(|d| format!("{d}/"))
+                .unwrap_or_else(|| {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                    format!("{home}/")
+                })
+        };
+
+        let repl = format!("{head}{dir_str}{chosen}");
+        self.composer.replace_range(ts, cursor, &repl);
+        self.completion_index = 0;
+        true
+    }
+
+    // ── keyboard / mouse ──
+
+    fn on_composer_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ks = &event.keystroke;
+        let ctrl = ks.modifiers.control;
+        let shift = ks.modifiers.shift;
+        let alt_or_plat = ks.modifiers.alt || ks.modifiers.platform;
+
+        if alt_or_plat {
+            return;
+        }
+
+        // Reset blink timer on any user input so cursor is visible during typing
+        self.blink_start = std::time::Instant::now();
+        self.composer.cursor_visible = true;
+
+        // Check for file-path completion list to handle up/down navigation
+        let file_matches = self.file_path_completions();
+        let has_files = !file_matches.is_empty();
+        let cmd_completion = self.command_completion();
+        let has_cmd = cmd_completion.is_some();
+
+        // up/down: navigate file completions if visible, else delegate to composer
+        match ks.key.as_str() {
+            "up" if has_files => {
+                self.completion_index = self.completion_index.saturating_sub(1);
+                cx.notify();
+                return;
+            }
+            "down" if has_files => {
+                let max = file_matches.len().saturating_sub(1);
+                self.completion_index = (self.completion_index + 1).min(max);
+                cx.notify();
+                return;
+            }
+            _ => {}
+        }
+
+        // Delegate to editor (backspace, delete, arrows, home, end, ctrl+a)
+        // But skip up/down when completions visible (already handled above)
+        let skip_composer = (has_files || has_cmd) && matches!(ks.key.as_str(), "up" | "down");
+        if !skip_composer && self.composer.on_key_down(event) {
+            cx.notify();
+            return;
+        }
+
+        match ks.key.as_str() {
+            "enter" => {
+                if shift {
+                    self.composer.insert_str("\n");
+                    cx.notify();
+                    return;
+                }
+                if self.accept_command_completion() {
+                    cx.notify();
+                    return;
+                }
+                self.send_current_message(cx);
+            }
+            "tab" => {
+                if self.accept_command_completion() {
+                    cx.notify();
+                }
+            }
+            "escape" => {
+                self.cancel_generation(cx);
+            }
+            "v" if ctrl => {
+                if self.pending_clipboard_read.is_none() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let result = arboard::Clipboard::new().and_then(|mut c| c.get_text());
+                        let _ = tx.send(result);
+                    });
+                    self.pending_clipboard_read = Some(rx);
+                }
+            }
+            "c" if ctrl => {
+                if let Some(text) = self.composer.selected_text() {
+                    if let Ok(mut c) = arboard::Clipboard::new() {
+                        let _ = c.set_text(text);
+                    }
+                }
+            }
+            "x" if ctrl => {
+                if let Some(text) = self.composer.selected_text() {
+                    if let Ok(mut c) = arboard::Clipboard::new() {
+                        let _ = c.set_text(text);
+                    }
+                }
+                self.composer.delete_before_cursor(); // selection delete
+                cx.notify();
+            }
+            "space" if !ctrl => {
+                self.composer.insert_char(' ');
+                cx.notify();
+            }
+            _ => {
+                if ctrl {
+                    return;
+                }
+                if let Some(ref kc) = ks.key_char {
+                    for ch in kc.chars() {
+                        self.composer.insert_char(ch);
+                    }
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    fn on_composer_mouse_down(
+        &mut self,
+        _event: &MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // NOTE: MouseDownEvent.position is window-relative in GPUI 0.2,
+        // not element-relative. For now, clicking anywhere in composer
+        // moves cursor to end. Full pixel positioning needs element bounds.
+        self.composer.click_at_end();
+        cx.notify();
+    }
+
+    fn on_composer_mouse_move(
+        &mut self,
+        _event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Mouse drag extends selection from anchor to end of text
+        // (pixel-perfect drag needs element-relative coords, not available in GPUI 0.2)
+        if self.composer.drag_to_end() {
+            cx.notify();
+        }
+    }
+
+    fn on_composer_mouse_up(
+        &mut self,
+        _event: &MouseUpEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        self.composer.end_drag();
+    }
+
+    // ── streaming / sidebar / messages ──
 
     fn pump_streaming(&mut self) -> bool {
         let active = self.shell.poll_streaming();
@@ -146,6 +629,13 @@ impl RoninWindow {
             self.chat_provider = Some(HttpOllamaProvider::new("http://localhost:11434"));
         }
         active
+    }
+
+    fn cancel_generation(&mut self, cx: &mut Context<Self>) {
+        if let Err(e) = self.shell.cancel_streaming() {
+            tracing::error!(%e, "failed to cancel generation");
+        }
+        cx.notify();
     }
 
     fn create_new_thread(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -174,60 +664,6 @@ impl RoninWindow {
         }
     }
 
-    fn focus_composer(&mut self, _: &MouseDownEvent, window: &mut Window, _cx: &mut Context<Self>) {
-        window.focus(&self.composer_focus);
-    }
-
-    fn on_composer_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let keystroke = &event.keystroke;
-        let has_text_mod =
-            keystroke.modifiers.alt || keystroke.modifiers.control || keystroke.modifiers.platform;
-
-        if has_text_mod {
-            return;
-        }
-
-        match keystroke.key.as_str() {
-            "enter" => {
-                if keystroke.modifiers.shift {
-                    self.composer_text.push('\n');
-                    cx.notify();
-                    return;
-                }
-                self.send_current_message(cx);
-            }
-            "escape" => {
-                self.cancel_generation(cx);
-            }
-            "backspace" => {
-                self.composer_text.pop();
-                cx.notify();
-            }
-            "space" => {
-                self.composer_text.push(' ');
-                cx.notify();
-            }
-            key => {
-                if key.len() == 1 {
-                    self.composer_text.push_str(key);
-                    cx.notify();
-                }
-            }
-        }
-    }
-
-    fn cancel_generation(&mut self, cx: &mut Context<Self>) {
-        if let Err(e) = self.shell.cancel_streaming() {
-            tracing::error!(%e, "failed to cancel generation");
-        }
-        cx.notify();
-    }
-
     fn copy_to_clipboard(&mut self, id: String, text: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         self.copied_state = Some((id, std::time::Instant::now()));
@@ -241,23 +677,14 @@ impl RoninWindow {
         cx: &mut Context<Self>,
     ) {
         let keystroke = &event.keystroke;
-
         match keystroke.key.as_str() {
-            "n" if keystroke.modifiers.control => {
-                self.create_new_thread_shortcut(window, cx);
-            }
-            "l" | "k" if keystroke.modifiers.control => {
-                self.focus_composer_shortcut(window, cx);
-            }
-            "r" if keystroke.modifiers.control => {
-                self.retry_generation_shortcut(window, cx);
-            }
+            "n" if keystroke.modifiers.control => self.create_new_thread_shortcut(window, cx),
+            "l" | "k" if keystroke.modifiers.control => self.focus_composer_shortcut(window, cx),
+            "r" if keystroke.modifiers.control => self.retry_generation_shortcut(window, cx),
             "g" if keystroke.modifiers.control && keystroke.modifiers.shift => {
                 self.regenerate_message_shortcut(cx);
             }
-            "escape" => {
-                self.cancel_generation(cx);
-            }
+            "escape" => self.cancel_generation(cx),
             _ => {}
         }
     }
@@ -277,7 +704,6 @@ impl RoninWindow {
         cx.notify();
     }
 
-    // Shortcuts whose features are not added yet
     fn retry_generation_shortcut(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let msgs = match &self.shell.state().messages {
             Some(m) => m,
@@ -300,12 +726,10 @@ impl RoninWindow {
         if self.shell.is_generation_active() {
             return;
         }
-
         let provider = match self.chat_provider.take() {
             Some(p) => p,
             None => HttpOllamaProvider::new("http://localhost:11434"),
         };
-
         let model = match &self.shell.state().provider_status {
             ProviderStatus::OllamaOnline { model } => model.clone(),
             _ => {
@@ -313,7 +737,6 @@ impl RoninWindow {
                 return;
             }
         };
-
         if let Err(e) = self
             .shell
             .retry_message(&message_id, Box::new(provider), &model)
@@ -328,17 +751,14 @@ impl RoninWindow {
         if self.shell.is_generation_active() {
             return;
         }
-
         let thread_id = match self.shell.state().selected_thread_id.clone() {
             Some(id) => id,
             None => return,
         };
-
         let provider = match self.chat_provider.take() {
             Some(p) => p,
             None => HttpOllamaProvider::new("http://localhost:11434"),
         };
-
         let model = match &self.shell.state().provider_status {
             ProviderStatus::OllamaOnline { model } => model.clone(),
             _ => {
@@ -346,7 +766,6 @@ impl RoninWindow {
                 return;
             }
         };
-
         if let Err(e) = self
             .shell
             .regenerate_last_assistant(&thread_id, Box::new(provider), &model)
@@ -357,7 +776,7 @@ impl RoninWindow {
         cx.notify();
     }
 
-
+    // ── rendering ──
 
     fn render_sidebar(&self, theme: &M0Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.shell.state();
@@ -372,7 +791,6 @@ impl RoninWindow {
             } else {
                 theme.surface_muted
             };
-
             div()
                 .rounded_md()
                 .px_3()
@@ -490,7 +908,6 @@ impl RoninWindow {
         };
 
         let is_generating = self.shell.is_generation_active();
-
         let last_assistant_id = messages
             .iter()
             .rev()
@@ -501,18 +918,14 @@ impl RoninWindow {
             if msg.role == MessageRole::System {
                 return None;
             }
-
             let (label, bg) = match msg.role {
                 MessageRole::User => ("You", theme.surface_muted),
                 MessageRole::Assistant => ("Assistant", theme.surface_selected),
                 MessageRole::System => unreachable!(),
             };
-
             let raw_content = msg.content.clone();
-
             let is_copied = self.copied_state.as_ref().map(|(id, _)| id) == Some(&msg.id);
             let copy_text = if is_copied { "Copied!" } else { "Copy" };
-
             let mut message_body = div().w_full().flex().flex_col().gap_3();
 
             let blocks = if let Some((len, cached_blocks)) = self.parsed_messages.get(&msg.id) {
@@ -524,7 +937,6 @@ impl RoninWindow {
             } else {
                 None
             };
-
             let blocks = blocks.unwrap_or_else(|| {
                 let parsed = ronin::markdown::parse_markdown(&msg.content);
                 self.parsed_messages
@@ -572,17 +984,14 @@ impl RoninWindow {
                             .flex()
                             .flex_col()
                             .overflow_x_scroll();
-
                         for line in content.split('\n') {
                             code_lines = code_lines.child(div().child(line.to_string()));
                         }
-
                         let block_id = format!("{}-code-{}", msg.id, block_idx);
                         let is_block_copied =
                             self.copied_state.as_ref().map(|(id, _)| id) == Some(&block_id);
                         let block_copy_text = if is_block_copied { "Copied!" } else { "Copy" };
                         let code_content = content.clone();
-
                         let header = div()
                             .w_full()
                             .flex()
@@ -619,7 +1028,6 @@ impl RoninWindow {
                                         }),
                                     ),
                             );
-
                         div()
                             .w_full()
                             .overflow_hidden()
@@ -676,54 +1084,80 @@ impl RoninWindow {
             }
 
             let is_last_assistant = Some(&msg.id) == last_assistant_id.as_ref();
-            let mut message_actions = div().flex().flex_row().gap_3()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(if is_copied { theme.text_primary } else { theme.accent })
-                        .cursor_pointer()
-                        .child(copy_text)
-                        .on_mouse_down(MouseButton::Left, cx.listener({
+            let mut message_actions = div().flex().flex_row().gap_3().child(
+                div()
+                    .text_xs()
+                    .text_color(if is_copied {
+                        theme.text_primary
+                    } else {
+                        theme.accent
+                    })
+                    .cursor_pointer()
+                    .child(copy_text)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener({
                             let msg_id = msg.id.clone();
                             let raw_content = raw_content.clone();
                             move |this, _, _, cx| {
                                 this.copy_to_clipboard(msg_id.clone(), raw_content.clone(), cx);
                             }
-                        }))
-                );
+                        }),
+                    ),
+            );
 
-            if msg.role == MessageRole::Assistant && (msg.status == ronin_core::MessageStatus::Failed || msg.status == ronin_core::MessageStatus::Error) {
+            if msg.role == MessageRole::Assistant
+                && (msg.status == ronin_core::MessageStatus::Failed
+                    || msg.status == ronin_core::MessageStatus::Error)
+            {
                 message_actions = message_actions.child(
                     div()
                         .text_xs()
-                        .text_color(if is_generating { theme.text_muted } else { theme.accent })
+                        .text_color(if is_generating {
+                            theme.text_muted
+                        } else {
+                            theme.accent
+                        })
                         .cursor_pointer()
                         .child("Retry")
-                        .on_mouse_down(MouseButton::Left, cx.listener({
-                            let msg_id = msg.id.clone();
-                            move |this, _, _, cx| {
-                                if !this.shell.is_generation_active() {
-                                    this.retry_failed_message(msg_id.clone(), cx);
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener({
+                                let msg_id = msg.id.clone();
+                                move |this, _, _, cx| {
+                                    if !this.shell.is_generation_active() {
+                                        this.retry_failed_message(msg_id.clone(), cx);
+                                    }
                                 }
-                            }
-                        }))
+                            }),
+                        ),
                 );
             }
 
-            if is_last_assistant && (msg.status == ronin_core::MessageStatus::Complete || msg.status == ronin_core::MessageStatus::Cancelled) {
+            if is_last_assistant
+                && (msg.status == ronin_core::MessageStatus::Complete
+                    || msg.status == ronin_core::MessageStatus::Cancelled)
+            {
                 message_actions = message_actions.child(
                     div()
                         .text_xs()
-                        .text_color(if is_generating { theme.text_muted } else { theme.accent })
+                        .text_color(if is_generating {
+                            theme.text_muted
+                        } else {
+                            theme.accent
+                        })
                         .cursor_pointer()
                         .child("Regenerate")
-                        .on_mouse_down(MouseButton::Left, cx.listener({
-                            move |this, _, _, cx| {
-                                if !this.shell.is_generation_active() {
-                                    this.regenerate_last_assistant(cx);
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener({
+                                move |this, _, _, cx| {
+                                    if !this.shell.is_generation_active() {
+                                        this.regenerate_last_assistant(cx);
+                                    }
                                 }
-                            }
-                        }))
+                            }),
+                        ),
                 );
             }
 
@@ -764,11 +1198,9 @@ impl RoninWindow {
             .gap_2()
             .id("message-scroll")
             .overflow_y_scroll();
-
         for el in message_elements {
             container = container.child(el);
         }
-
         if is_generating {
             container = container.child(
                 div()
@@ -777,7 +1209,6 @@ impl RoninWindow {
                     .child("● Generating response…"),
             );
         }
-
         container
     }
 
@@ -787,35 +1218,143 @@ impl RoninWindow {
         composer_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let display_text = if self.composer_text.is_empty() {
-            "Ask Ronin anything…".to_string()
-        } else {
-            self.composer_text.clone()
-        };
-
-        let text_color = if self.composer_text.is_empty() {
-            theme.text_muted
-        } else {
-            theme.text_primary
-        };
-
         let is_generating = self.shell.is_generation_active();
         let send_btn_bg = if is_generating {
             theme.surface_muted
         } else {
             theme.accent
         };
-
         let border_color = if composer_focused {
             theme.accent
         } else {
             theme.border_strong
         };
 
-        div().p_6().child(
+        let mut composer = div().p_6().flex().flex_col().gap_2();
+
+        // attachment pills
+        let pill_labels = self.attachment_pill_labels();
+        if !pill_labels.is_empty() {
+            let preattached_count = self.preattached_files.len();
+            let mut pills = div().flex().flex_row().flex_wrap().gap_2();
+            for (index, label) in pill_labels.into_iter().enumerate() {
+                let mut pill = div()
+                    .rounded_lg()
+                    .px_3()
+                    .py_1()
+                    .bg(theme.surface_muted)
+                    .text_color(theme.text_primary)
+                    .text_xs()
+                    .child(format!("📎 {label}"));
+                if index < preattached_count {
+                    pill = pill.child(
+                        div()
+                            .ml_2()
+                            .text_color(theme.accent)
+                            .child("×")
+                            .cursor_pointer()
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.remove_preattached_file(index, cx);
+                                }),
+                            ),
+                    );
+                }
+                pills = pills.child(pill);
+            }
+            composer = composer.child(pills);
+        }
+
+        // attachment errors
+        for error in &self.attachment_errors {
+            composer = composer.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.accent)
+                    .child(error.clone()),
+            );
+        }
+
+        // command completion dropdown
+        if let Some((command, label, _, _)) = self.command_completion() {
+            composer = composer.child(
+                div()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border_subtle)
+                    .bg(theme.surface_muted)
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .text_color(theme.text_primary)
+                    .child(format!("{command} — {label}  (Tab/Enter)"))
+                    .hover(|style| style.bg(theme.surface_hover).cursor_pointer())
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.accept_command_completion();
+                            cx.notify();
+                        }),
+                    ),
+            );
+        }
+
+        // file path completions dropdown
+        let file_matches = self.file_path_completions();
+        if !file_matches.is_empty() {
+            let ci = self
+                .completion_index
+                .min(file_matches.len().saturating_sub(1));
+            let mut dropdown = div()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border_subtle)
+                .bg(theme.surface_muted)
+                .flex()
+                .flex_col()
+                .overflow_hidden();
+            for (i, item) in file_matches.iter().enumerate() {
+                let bg = if i == ci {
+                    theme.surface_selected
+                } else {
+                    theme.surface_muted
+                };
+                let mut entry = div()
+                    .px_3()
+                    .py_1()
+                    .text_sm()
+                    .text_color(theme.text_primary)
+                    .bg(bg)
+                    .hover(|style| style.bg(theme.surface_hover).cursor_pointer())
+                    .child(item.clone());
+                if i == ci {
+                    entry = entry.bg(theme.surface_selected);
+                }
+                entry = entry.on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.completion_index = i;
+                        this.accept_command_completion();
+                        cx.notify();
+                    }),
+                );
+                dropdown = dropdown.child(entry);
+            }
+            composer = composer.child(dropdown);
+        }
+
+        // Auto-scroll: only follow cursor when on the last visual line
+        let max_input_h = self.composer_rem * 3.0 * 6.0 + self.composer_rem * 4.0 * 2.0;
+        let lines = self.composer.visual_lines();
+        let cursor_line = self.composer.visual_line_index(self.composer.cursor());
+        if cursor_line >= lines.len().saturating_sub(1) {
+            self.composer_scroll_handle.scroll_to_bottom();
+        }
+        composer.child(
             div()
                 .flex()
-                .items_center()
+                .items_end()
                 .gap_2()
                 .child(
                     div()
@@ -825,13 +1364,24 @@ impl RoninWindow {
                         .border_color(border_color)
                         .bg(theme.composer_background)
                         .p_4()
-                        .text_color(text_color)
-                        .child(display_text)
+                        .flex()
+                        .flex_col()
                         .id("composer")
+                        .overflow_y_scroll()
+                        .track_scroll(&self.composer_scroll_handle)
+                        .max_h(px(max_input_h))
                         .cursor_text()
                         .track_focus(&self.composer_focus)
                         .on_key_down(cx.listener(Self::on_composer_key_down))
-                        .on_mouse_down(MouseButton::Left, cx.listener(Self::focus_composer)),
+                        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_composer_mouse_down))
+                        .on_mouse_move(cx.listener(Self::on_composer_mouse_move))
+                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_composer_mouse_up))
+                        .child(self.composer.render_text(
+                            "Ask Ronin anything…",
+                            theme.text_primary,
+                            theme.text_muted,
+                            theme.accent,
+                        )),
                 )
                 .child(
                     div()
@@ -863,24 +1413,48 @@ impl RoninWindow {
 
 impl Render for RoninWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Poll for streaming chunks before rendering.
         let streaming_active = self.pump_streaming();
-
-        // Auto-focus on first render so the text cursor is visible.
         if self.needs_initial_focus {
             self.needs_initial_focus = false;
             window.focus(&self.composer_focus);
         }
-
         let theme = M0Theme::dark();
         let composer_focused = self.composer_focus.is_focused(window);
 
-        let sidebar = self.render_sidebar(&theme, cx);
+        // Blink cursor: 530ms visible, 470ms hidden cycle
+        let blink_elapsed = self.blink_start.elapsed().as_millis() as u64;
+        self.composer.cursor_visible = (blink_elapsed % 1000) < 530;
 
+        // Poll for completed clipboard reads (non-blocking background paste)
+        if let Some(ref rx) = self.pending_clipboard_read {
+            if let Ok(result) = rx.try_recv() {
+                self.pending_clipboard_read = None;
+                match result {
+                    Ok(text) => {
+                        self.composer.insert_str(&text);
+                    }
+                    Err(e) => {
+                        tracing::warn!("clipboard paste failed: {e}");
+                    }
+                }
+            }
+        }
+
+        // Estimate composer text container width for layout
+        let rem = self.composer_rem;
+        let sidebar_w = 200.0;
+        let outer_pad = rem * 6.0 * 2.0; // p_6 left+right
+        let inner_pad = rem * 4.0 * 2.0; // p_4 left+right
+        let border_w = 4.0; // border_2
+        let send_btn_w = 80.0;
+        let gap_w = rem * 0.5; // gap_2
+        let text_w = 1120.0 - sidebar_w - outer_pad - inner_pad - border_w - send_btn_w - gap_w;
+        self.composer.set_container_width(text_w.max(100.0));
+
+        let sidebar = self.render_sidebar(&theme, cx);
         let title = Self::current_thread_title(self.shell.state())
             .map(|t| t.to_string())
             .unwrap_or_else(|| "New Chat".to_string());
-
         let messages = self.render_messages(&theme, cx);
         let composer = self.render_composer(&theme, composer_focused, cx);
 
@@ -910,28 +1484,18 @@ impl Render for RoninWindow {
                     .child(composer),
             );
 
-        // If streaming is active, schedule a repaint on the next animation frame.
-        // NOTE: cx.notify() is a no-op here because GPUI's refresh() guard
-        // skips invalidation while the window is already drawing (inside render).
-        // request_animation_frame() defers the notify to the next frame callback,
-        // reliably driving continuous repaints during streaming.
-        let mut needs_frame = streaming_active;
-
+        let mut needs_frame = streaming_active || composer_focused;
         if let Some((_, time)) = self.copied_state.as_ref() {
             if time.elapsed().as_secs_f32() >= 1.0 {
                 self.copied_state = None;
-                // Since we change state during render, we need to request a frame
-                // to reflect the cleared state.
                 needs_frame = true;
             } else {
                 needs_frame = true;
             }
         }
-
         if needs_frame {
             window.request_animation_frame();
         }
-
         ui
     }
 }
