@@ -222,6 +222,10 @@ pub struct DbThread {
     pub updated_at: i64,
     /// Whether the thread is archived.
     pub archived: bool,
+    /// Provider name for this thread (e.g. `"ollama"`, `"openai"`).
+    pub provider: Option<String>,
+    /// Model name for this thread (e.g. `"llama3.2"`).
+    pub model: Option<String>,
 }
 
 /// Persisted artifact row returned by `ronin_db`.
@@ -301,8 +305,17 @@ impl RoninDb {
         Ok(db)
     }
 
-    /// Creates and persists a new thread titled `New Chat`.
+    /// Creates and persists a new thread titled `New Chat` with no provider or model.
     pub fn create_thread(&self) -> Result<DbThread> {
+        self.create_thread_with_provider(None, None)
+    }
+
+    /// Creates and persists a new thread with an optional provider and model.
+    pub fn create_thread_with_provider(
+        &self,
+        provider: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<DbThread> {
         let now = unix_timestamp_millis();
         let thread = DbThread {
             id: Uuid::now_v7().to_string(),
@@ -310,22 +323,56 @@ impl RoninDb {
             created_at: now,
             updated_at: now,
             archived: false,
+            provider: provider.map(String::from),
+            model: model.map(String::from),
         };
 
         self.conn
             .execute(
-                "INSERT INTO threads (id, title, created_at, updated_at, archived) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO threads (id, title, created_at, updated_at, archived, provider, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     thread.id,
                     thread.title,
                     thread.created_at,
                     thread.updated_at,
-                    if thread.archived { 1_i64 } else { 0_i64 }
+                    if thread.archived { 1_i64 } else { 0_i64 },
+                    thread.provider,
+                    thread.model,
                 ],
             )
             .map_err(RoninDbError::CreateThread)?;
 
         Ok(thread)
+    }
+
+    /// Updates a thread's provider and bumps its updated_at timestamp.
+    pub fn update_thread_provider(&self, id: &str, provider: Option<&str>) -> Result<()> {
+        let now = unix_timestamp_millis();
+        self.conn
+            .execute(
+                "UPDATE threads SET provider = ?1, updated_at = ?2 WHERE id = ?3",
+                params![provider, now, id],
+            )
+            .map_err(|source| RoninDbError::UpdateThread {
+                id: id.to_string(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// Updates a thread's model and bumps its updated_at timestamp.
+    pub fn update_thread_model(&self, id: &str, model: Option<&str>) -> Result<()> {
+        let now = unix_timestamp_millis();
+        self.conn
+            .execute(
+                "UPDATE threads SET model = ?1, updated_at = ?2 WHERE id = ?3",
+                params![model, now, id],
+            )
+            .map_err(|source| RoninDbError::UpdateThread {
+                id: id.to_string(),
+                source,
+            })?;
+        Ok(())
     }
 
     /// Updates the title of a thread and bumps its updated_at timestamp.
@@ -348,7 +395,7 @@ impl RoninDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, title, created_at, updated_at, archived FROM threads ORDER BY created_at ASC, id ASC",
+                "SELECT id, title, created_at, updated_at, archived, provider, model FROM threads ORDER BY created_at ASC, id ASC",
             )
             .map_err(RoninDbError::PrepareThreadList)?;
 
@@ -360,6 +407,8 @@ impl RoninDb {
                     created_at: row.get(2)?,
                     updated_at: row.get(3)?,
                     archived: row.get::<_, i64>(4)? != 0,
+                    provider: row.get(5)?,
+                    model: row.get(6)?,
                 })
             })
             .map_err(RoninDbError::QueryThreads)?
