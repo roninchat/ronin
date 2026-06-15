@@ -989,28 +989,28 @@ impl RoninWindow {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
-                                this.memories_panel_open = !this.memories_panel_open;
-                                cx.notify();
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .rounded_lg()
-                        .px_3()
-                        .py_2()
-                        .bg(theme.surface_muted)
-                        .text_color(theme.text_primary)
-                        .font_weight(FontWeight(500.))
-                        .child("Artifacts")
-                        .hover(|style| style.bg(theme.surface_hover).cursor_pointer())
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.artifacts_panel_open = !this.artifacts_panel_open;
-                                cx.notify();
-                            }),
-                        ),
+                            this.memories_panel_open = !this.memories_panel_open;
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .rounded_lg()
+                    .px_3()
+                    .py_2()
+                    .bg(theme.surface_muted)
+                    .text_color(theme.text_primary)
+                    .font_weight(FontWeight(500.))
+                    .child("Artifacts")
+                    .hover(|style| style.bg(theme.surface_hover).cursor_pointer())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.artifacts_panel_open = !this.artifacts_panel_open;
+                            cx.notify();
+                        }),
+                    ),
             )
             .child(
                 div()
