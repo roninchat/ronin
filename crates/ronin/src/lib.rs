@@ -5,19 +5,31 @@
 /// Markdown parsing and AST for GPUI rendering.
 pub mod markdown;
 
+/// Composer text editor state and input handling.
+pub mod composer;
+
 use std::path::PathBuf;
 
 use ronin_core::RoninPaths;
 
 /// User-requested launch behavior parsed from CLI arguments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchIntent {
     /// Open Ronin with the default persisted shell state.
-    OpenPersisted,
+    OpenPersisted {
+        /// File paths to attach when the app opens.
+        attach_paths: Vec<PathBuf>,
+    },
     /// Open Ronin with a newly created empty chat selected.
-    NewThread,
+    NewThread {
+        /// File paths to attach when the app opens.
+        attach_paths: Vec<PathBuf>,
+    },
     /// Open Ronin with Ollama selected as the local provider.
-    OpenWithOllama,
+    OpenWithOllama {
+        /// File paths to attach when the app opens.
+        attach_paths: Vec<PathBuf>,
+    },
 }
 
 /// Errors returned by Ronin launcher setup.
@@ -27,8 +39,8 @@ pub enum LauncherError {
     #[error("HOME is required when XDG directories are not set")]
     MissingHome,
 
-    /// CLI argument is not supported by the M0 launcher.
-    #[error("unsupported launch flag '{flag}'. supported flags: --new, --provider ollama")]
+    /// CLI argument is not supported by the launcher.
+    #[error("unsupported launch flag '{flag}'. supported flags: --new, --provider ollama, --attach <path>")]
     UnsupportedFlag {
         /// Unsupported flag supplied by the user.
         flag: String,
@@ -39,14 +51,30 @@ pub enum LauncherError {
 pub fn parse_launch_intent(
     args: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Result<LaunchIntent, LauncherError> {
-    let mut intent = LaunchIntent::OpenPersisted;
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum LaunchMode {
+        Persisted,
+        NewThread,
+        Ollama,
+    }
+
+    let mut mode = LaunchMode::Persisted;
+    let mut attach_paths = Vec::new();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let arg = arg.as_ref();
         match arg {
-            "--new" => intent = LaunchIntent::NewThread,
+            "--new" => mode = LaunchMode::NewThread,
+            "--attach" => match args.next().as_ref().map(AsRef::as_ref) {
+                Some(path) => attach_paths.push(PathBuf::from(path)),
+                None => {
+                    return Err(LauncherError::UnsupportedFlag {
+                        flag: "--attach".to_string(),
+                    });
+                }
+            },
             "--provider" => match args.next().as_ref().map(AsRef::as_ref) {
-                Some("ollama") => intent = LaunchIntent::OpenWithOllama,
+                Some("ollama") => mode = LaunchMode::Ollama,
                 Some(provider) => {
                     return Err(LauncherError::UnsupportedFlag {
                         flag: format!("--provider {provider}"),
@@ -65,6 +93,12 @@ pub fn parse_launch_intent(
             }
         }
     }
+
+    let intent = match mode {
+        LaunchMode::Persisted => LaunchIntent::OpenPersisted { attach_paths },
+        LaunchMode::NewThread => LaunchIntent::NewThread { attach_paths },
+        LaunchMode::Ollama => LaunchIntent::OpenWithOllama { attach_paths },
+    };
 
     tracing::info!(intent = ?intent, "ronin launch intent parsed");
     Ok(intent)

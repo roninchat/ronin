@@ -4,14 +4,37 @@ use ronin::{parse_launch_intent, ronin_paths_from_env, LaunchIntent};
 fn parse_launch_intent_should_return_new_thread_when_new_flag_is_present() {
     let intent = parse_launch_intent(["--new"]).expect("parse --new");
 
-    assert_eq!(intent, LaunchIntent::NewThread);
+    assert_eq!(
+        intent,
+        LaunchIntent::NewThread {
+            attach_paths: Vec::new(),
+        }
+    );
 }
 
 #[test]
 fn parse_launch_intent_should_accept_ollama_provider() {
     let intent = parse_launch_intent(["--provider", "ollama"]).expect("parse ollama provider");
 
-    assert_eq!(intent, LaunchIntent::OpenWithOllama);
+    assert_eq!(
+        intent,
+        LaunchIntent::OpenWithOllama {
+            attach_paths: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn parse_launch_intent_should_collect_multiple_attach_flags() {
+    let intent = parse_launch_intent(["--new", "--attach", "a.txt", "--attach", "b.txt"])
+        .expect("parse attach flags");
+
+    assert_eq!(
+        intent,
+        LaunchIntent::NewThread {
+            attach_paths: vec!["a.txt".into(), "b.txt".into()],
+        }
+    );
 }
 
 #[test]
@@ -20,7 +43,7 @@ fn parse_launch_intent_should_reject_unsupported_flags() {
 
     assert_eq!(
         error.to_string(),
-        "unsupported launch flag '--unknown'. supported flags: --new, --provider ollama"
+        "unsupported launch flag '--unknown'. supported flags: --new, --provider ollama, --attach <path>"
     );
 }
 
@@ -33,7 +56,7 @@ fn ronin_should_exit_nonzero_when_unsupported_flag_is_passed() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains(
-        "unsupported launch flag '--unknown'. supported flags: --new, --provider ollama"
+        "unsupported launch flag '--unknown'. supported flags: --new, --provider ollama, --attach <path>"
     ));
 }
 

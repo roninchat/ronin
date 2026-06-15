@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+arboard.workspace = true
 gpui = "0.2.2"
 pulldown-cmark = "0.13.4"
 ronin_app = { path = "../ronin_app" }

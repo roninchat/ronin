@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ronin_db::{
@@ -49,6 +49,233 @@ pub struct ChatMessage {
     pub role: String,
     /// Message content.
     pub content: String,
+}
+
+/// A parsed explicit context reference from the composer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextToolRef {
+    /// User requested a file attachment by path.
+    File(String),
+    /// User requested current clipboard text.
+    Clipboard,
+}
+
+/// Parsed composer text and explicit context references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedContextTools {
+    /// User-visible prompt after context references are removed.
+    pub visible_message: String,
+    /// Explicit context references found in source order.
+    pub refs: Vec<ContextToolRef>,
+}
+
+/// Parses explicit `@file:<path>` and `@clipboard` context refs from composer text.
+pub fn parse_context_tools(input: &str) -> ParsedContextTools {
+    let mut refs = Vec::new();
+    let mut visible = String::new();
+    let mut rest = input;
+
+    while let Some(at) = find_next_context_ref(rest) {
+        visible.push_str(&rest[..at]);
+        let candidate = &rest[at..];
+
+        if let Some(after_file) = candidate.strip_prefix("@file:") {
+            let (path, consumed) = parse_file_ref(after_file);
+            if !path.is_empty() {
+                refs.push(ContextToolRef::File(path));
+                rest = &candidate["@file:".len() + consumed..];
+                continue;
+            }
+        }
+
+        if candidate.len() >= "@clipboard".len()
+            && candidate[.."@clipboard".len()].eq_ignore_ascii_case("@clipboard")
+            && is_ref_boundary(candidate["@clipboard".len()..].chars().next())
+        {
+            refs.push(ContextToolRef::Clipboard);
+            rest = &candidate["@clipboard".len()..];
+            continue;
+        }
+
+        visible.push('@');
+        rest = &candidate['@'.len_utf8()..];
+    }
+
+    visible.push_str(rest);
+
+    ParsedContextTools {
+        visible_message: visible.split_whitespace().collect::<Vec<_>>().join(" "),
+        refs,
+    }
+}
+
+fn find_next_context_ref(input: &str) -> Option<usize> {
+    input.match_indices('@').find_map(|(idx, _)| {
+        let candidate = &input[idx..];
+        if candidate.starts_with("@file:")
+            || candidate
+                .get(.."@clipboard".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("@clipboard"))
+        {
+            Some(idx)
+        } else {
+            None
+        }
+    })
+}
+
+fn parse_file_ref(input: &str) -> (String, usize) {
+    if let Some(quoted) = input.strip_prefix('"') {
+        if let Some(end) = quoted.find('"') {
+            return (quoted[..end].to_string(), end + 2);
+        }
+        return (quoted.to_string(), input.len());
+    }
+
+    let consumed = input
+        .char_indices()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx))
+        .unwrap_or(input.len());
+    (input[..consumed].to_string(), consumed)
+}
+
+fn is_ref_boundary(next: Option<char>) -> bool {
+    next.is_none_or(char::is_whitespace)
+}
+
+/// Maximum file attachment size in bytes.
+pub const MAX_FILE_ATTACHMENT_BYTES: u64 = 1_048_576;
+
+/// Context attachment prepared from an explicit user action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextAttachmentDraft {
+    /// Attachment kind.
+    pub kind: AttachmentKind,
+    /// Display name shown to users and persisted with metadata.
+    pub name: String,
+    /// MIME type if known; text attachments default to `text/plain`.
+    pub mime_type: String,
+    /// Clipboard text content; file content is not persisted here.
+    pub content: Option<String>,
+    /// Source file path for file attachments.
+    pub path: Option<PathBuf>,
+    /// Provider context block generated from this attachment.
+    pub context_block: String,
+    /// File size in bytes when attachment came from disk.
+    pub size_bytes: Option<u64>,
+}
+
+/// Errors produced while resolving explicit context attachments.
+#[derive(Debug, thiserror::Error)]
+pub enum ContextToolError {
+    /// File metadata could not be read.
+    #[error("failed to read file metadata for {path}: {source}")]
+    FileMetadata {
+        /// User-visible file path.
+        path: PathBuf,
+        /// Underlying filesystem error.
+        #[source]
+        source: io::Error,
+    },
+    /// User selected a directory instead of a regular file.
+    #[error("file {path} is a directory")]
+    IsDirectory {
+        /// User-visible file path.
+        path: PathBuf,
+    },
+    /// File exceeds configured size limit.
+    #[error("file {path} exceeds 1 MB attachment limit")]
+    FileTooLarge {
+        /// User-visible file path.
+        path: PathBuf,
+    },
+    /// File appears binary and should not be injected into prompt context.
+    #[error("file {path} appears to be binary")]
+    BinaryFile {
+        /// User-visible file path.
+        path: PathBuf,
+    },
+    /// File content could not be read as text.
+    #[error("failed to read file {path}: {source}")]
+    ReadFile {
+        /// User-visible file path.
+        path: PathBuf,
+        /// Underlying filesystem error.
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// Reads a text file selected by explicit `@file` context.
+pub fn read_file_attachment(
+    path: impl AsRef<Path>,
+    cwd: impl AsRef<Path>,
+) -> std::result::Result<ContextAttachmentDraft, ContextToolError> {
+    let requested_path = path.as_ref();
+    let resolved_path = if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        cwd.as_ref().join(requested_path)
+    };
+
+    let metadata =
+        std::fs::metadata(&resolved_path).map_err(|source| ContextToolError::FileMetadata {
+            path: requested_path.to_path_buf(),
+            source,
+        })?;
+
+    if metadata.is_dir() {
+        return Err(ContextToolError::IsDirectory {
+            path: requested_path.to_path_buf(),
+        });
+    }
+
+    if metadata.len() > MAX_FILE_ATTACHMENT_BYTES {
+        return Err(ContextToolError::FileTooLarge {
+            path: requested_path.to_path_buf(),
+        });
+    }
+
+    let bytes = std::fs::read(&resolved_path).map_err(|source| ContextToolError::ReadFile {
+        path: requested_path.to_path_buf(),
+        source,
+    })?;
+
+    if bytes.iter().take(8 * 1024).any(|byte| *byte == 0) {
+        return Err(ContextToolError::BinaryFile {
+            path: requested_path.to_path_buf(),
+        });
+    }
+
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let name = resolved_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("attached file")
+        .to_string();
+
+    Ok(ContextAttachmentDraft {
+        kind: AttachmentKind::File,
+        name: name.clone(),
+        mime_type: "text/plain".to_string(),
+        content: None,
+        path: Some(resolved_path),
+        context_block: format!("[Attached file: {name}]\n{text}"),
+        size_bytes: Some(metadata.len()),
+    })
+}
+
+/// Builds a clipboard context attachment from text read by the UI boundary.
+pub fn clipboard_attachment(text: &str) -> ContextAttachmentDraft {
+    ContextAttachmentDraft {
+        kind: AttachmentKind::Clipboard,
+        name: "clipboard".to_string(),
+        mime_type: "text/plain".to_string(),
+        content: Some(text.to_string()),
+        path: None,
+        context_block: format!("[Clipboard content]\n{text}"),
+        size_bytes: Some(text.len() as u64),
+    }
 }
 
 /// An event emitted during a streaming chat response.
@@ -267,12 +494,18 @@ impl OpenAiCompatibleProvider {
         {
             if let Ok(rt) = tokio::runtime::Runtime::new() {
                 if let Some(key) = rt.block_on(async {
-                    if let Ok(ss) = secret_service::SecretService::connect(secret_service::EncryptionType::Dh).await {
+                    if let Ok(ss) =
+                        secret_service::SecretService::connect(secret_service::EncryptionType::Dh)
+                            .await
+                    {
                         if let Ok(collection) = ss.get_default_collection().await {
-                            if let Ok(items) = collection.search_items(std::collections::HashMap::from([
-                                ("application", "ronin"),
-                                ("service", "openai")
-                            ])).await {
+                            if let Ok(items) = collection
+                                .search_items(std::collections::HashMap::from([
+                                    ("application", "ronin"),
+                                    ("service", "openai"),
+                                ]))
+                                .await
+                            {
                                 if let Some(item) = items.first() {
                                     if let Ok(secret) = item.get_secret().await {
                                         if let Ok(key) = std::str::from_utf8(&secret) {
@@ -294,7 +527,9 @@ impl OpenAiCompatibleProvider {
             return Ok(key);
         }
 
-        Err(RoninError::Config("No API key found. Set OPENAI_API_KEY or add a key in settings.".into()))
+        Err(RoninError::Config(
+            "No API key found. Set OPENAI_API_KEY or add a key in settings.".into(),
+        ))
     }
 }
 
@@ -339,10 +574,16 @@ impl ChatProvider for OpenAiCompatibleProvider {
 
         let mut messages = Vec::new();
         if let Some(sys) = &request.system_prompt {
-            messages.push(OpenAiMessage { role: "system", content: sys });
+            messages.push(OpenAiMessage {
+                role: "system",
+                content: sys,
+            });
         }
         for msg in &request.messages {
-            messages.push(OpenAiMessage { role: &msg.role, content: &msg.content });
+            messages.push(OpenAiMessage {
+                role: &msg.role,
+                content: &msg.content,
+            });
         }
 
         let body = OpenAiRequest {
@@ -353,7 +594,8 @@ impl ChatProvider for OpenAiCompatibleProvider {
 
         let key = self.get_api_key()?;
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(format!("{}/chat/completions", self.base_url))
             .header("Authorization", format!("Bearer {}", key))
             .json(&body)
@@ -403,7 +645,9 @@ impl ChatProvider for OpenAiCompatibleProvider {
                                     if let Some(delta) = &choice.delta {
                                         if let Some(content) = &delta.content {
                                             if !content.is_empty()
-                                                && tx.send(ChatStreamEvent::Chunk(content.clone())).is_err()
+                                                && tx
+                                                    .send(ChatStreamEvent::Chunk(content.clone()))
+                                                    .is_err()
                                             {
                                                 return;
                                             }
@@ -434,7 +678,8 @@ impl OllamaProvider for OpenAiCompatibleProvider {
             Err(_) => return OllamaHealth::Offline,
         };
 
-        match self.client
+        match self
+            .client
             .get(format!("{}/models", self.base_url))
             .header("Authorization", format!("Bearer {}", key))
             .timeout(std::time::Duration::from_secs(3))
@@ -458,7 +703,8 @@ impl OllamaProvider for OpenAiCompatibleProvider {
 
         let key = self.get_api_key()?;
 
-        let resp: ListResponse = self.client
+        let resp: ListResponse = self
+            .client
             .get(format!("{}/models", self.base_url))
             .header("Authorization", format!("Bearer {}", key))
             .timeout(std::time::Duration::from_secs(5))
@@ -918,12 +1164,7 @@ impl RoninSession {
     pub fn list_attachments(&self, message_id: &str) -> Result<Vec<Attachment>> {
         self.db
             .list_attachments_for_message(message_id)
-            .map(|attachments| {
-                attachments
-                    .into_iter()
-                    .map(Attachment::from)
-                    .collect()
-            })
+            .map(|attachments| attachments.into_iter().map(Attachment::from).collect())
             .map_err(Into::into)
     }
 
