@@ -10,8 +10,8 @@ use ronin::{
 };
 use ronin_app::{ProviderStatus, RoninAppError, RoninShell, ShellState};
 use ronin_core::{
-    clipboard_attachment, parse_context_tools, read_file_attachment, ContextAttachmentDraft,
-    ContextToolRef, HttpOllamaProvider, MessageRole,
+    clipboard_attachment, parse_context_tools, read_file_attachment, ChatProvider,
+    ContextAttachmentDraft, ContextToolRef, HttpOllamaProvider, MessageRole,
 };
 
 fn main() -> ExitCode {
@@ -32,7 +32,7 @@ fn run() -> Result<(), RunError> {
         | LaunchIntent::NewThread { attach_paths }
         | LaunchIntent::OpenWithOllama { attach_paths } => attach_paths.clone(),
     };
-    let shell = match intent {
+    let mut shell = match intent {
         LaunchIntent::OpenPersisted { .. } if !attach_paths.is_empty() => {
             RoninShell::open_with_new_thread(paths)?
         }
@@ -40,8 +40,8 @@ fn run() -> Result<(), RunError> {
         LaunchIntent::NewThread { .. } => RoninShell::open_with_new_thread(paths)?,
         LaunchIntent::OpenWithOllama { .. } => RoninShell::open_with_ollama(paths)?,
     };
-    let uses_ollama = matches!(intent, LaunchIntent::OpenWithOllama { .. });
-    tracing::info!(intent = ?intent, "ronin native shell starting");
+    let _ = shell.refresh_provider_status();
+    tracing::info!(intent = ?intent, "ronin launch intent parsed");
 
     Application::new().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1120.0), px(760.0)), cx);
@@ -65,11 +65,7 @@ fn run() -> Result<(), RunError> {
                         preattached_files: attach_paths.clone(),
                         attachment_errors: Vec::new(),
                         composer_focus: cx.focus_handle(),
-                        chat_provider: if uses_ollama {
-                            Some(HttpOllamaProvider::new("http://localhost:11434"))
-                        } else {
-                            None
-                        },
+                        chat_provider: None,
                         needs_initial_focus: true,
                         copied_state: None,
                         memories_panel_open: false,
@@ -113,7 +109,7 @@ struct RoninWindow {
     preattached_files: Vec<std::path::PathBuf>,
     attachment_errors: Vec<String>,
     composer_focus: FocusHandle,
-    chat_provider: Option<HttpOllamaProvider>,
+    chat_provider: Option<Box<dyn ChatProvider + Send>>,
     needs_initial_focus: bool,
     copied_state: Option<(String, std::time::Instant)>,
     memories_panel_open: bool,
@@ -127,6 +123,28 @@ struct RoninWindow {
 }
 
 impl RoninWindow {
+    fn resolve_active_chat_provider(&self) -> Option<Box<dyn ChatProvider + Send>> {
+        let thread_id = self.shell.state().selected_thread_id.as_deref()?;
+        let (provider_name, _) = self
+            .shell
+            .resolve_thread_provider_and_model(thread_id)
+            .ok()?;
+        let config = self.shell.session().load_config().ok()?;
+        if provider_name == "openai" {
+            let base_url = config
+                .openai
+                .as_ref()
+                .and_then(|o| o.base_url.clone())
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            Some(Box::new(ronin_core::OpenAiCompatibleProvider::new(
+                base_url,
+            )))
+        } else {
+            let base_url = config.ollama.base_url.clone();
+            Some(Box::new(HttpOllamaProvider::new(base_url)))
+        }
+    }
+
     // ── context / attachments ──
 
     fn resolve_context_attachments(&mut self, text: &str) -> (String, Vec<ContextAttachmentDraft>) {
@@ -161,10 +179,12 @@ impl RoninWindow {
                         if let Some(m) = mems.into_iter().find(|m| m.id.0 == id) {
                             attachments.push(ronin_core::memory_attachment(&m));
                         } else {
-                            self.attachment_errors.push(format!("Memory not found: {id}"));
+                            self.attachment_errors
+                                .push(format!("Memory not found: {id}"));
                         }
                     } else {
-                        self.attachment_errors.push(format!("Failed to list memories for {id}"));
+                        self.attachment_errors
+                            .push(format!("Failed to list memories for {id}"));
                     }
                 }
             }
@@ -186,7 +206,9 @@ impl RoninWindow {
         }
 
         let model = match &self.shell.state().provider_status {
-            ProviderStatus::OllamaOnline { model } => model.clone(),
+            ProviderStatus::OllamaOnline { model } | ProviderStatus::OpenAiReady { model } => {
+                model.clone()
+            }
             _ => {
                 if let Err(err) = self.shell.send_message_with_attachments(
                     &thread_id,
@@ -202,13 +224,17 @@ impl RoninWindow {
             }
         };
 
-        match self.chat_provider.take() {
+        let provider = self
+            .chat_provider
+            .take()
+            .or_else(|| self.resolve_active_chat_provider());
+        match provider {
             Some(provider) => {
                 let result = self.shell.begin_streaming_with_attachments(
                     &thread_id,
                     Some(&visible_text),
                     &attachments,
-                    Box::new(provider),
+                    provider,
                     &model,
                 );
                 match result {
@@ -218,8 +244,7 @@ impl RoninWindow {
                     }
                     Err(err) => {
                         tracing::error!(%err, "failed to begin streaming");
-                        self.chat_provider =
-                            Some(HttpOllamaProvider::new("http://localhost:11434"));
+                        self.chat_provider = self.resolve_active_chat_provider();
                         cx.notify();
                     }
                 }
@@ -467,7 +492,7 @@ impl RoninWindow {
                 .rfind(char::is_whitespace)
                 .map(|i| i + 1)
                 .unwrap_or(0);
-            
+
             let replacement = format!("@memory:{chosen_id} ");
             self.composer.replace_range(ts, cursor, &replacement);
             self.completion_index = 0;
@@ -685,7 +710,7 @@ impl RoninWindow {
     fn pump_streaming(&mut self) -> bool {
         let active = self.shell.poll_streaming();
         if !active && self.chat_provider.is_none() {
-            self.chat_provider = Some(HttpOllamaProvider::new("http://localhost:11434"));
+            self.chat_provider = self.resolve_active_chat_provider();
         }
         active
     }
@@ -796,23 +821,26 @@ impl RoninWindow {
         if self.shell.is_generation_active() {
             return;
         }
-        let provider = match self.chat_provider.take() {
+        let provider = self
+            .chat_provider
+            .take()
+            .or_else(|| self.resolve_active_chat_provider());
+        let provider = match provider {
             Some(p) => p,
-            None => HttpOllamaProvider::new("http://localhost:11434"),
+            None => Box::new(HttpOllamaProvider::new("http://localhost:11434")),
         };
         let model = match &self.shell.state().provider_status {
-            ProviderStatus::OllamaOnline { model } => model.clone(),
+            ProviderStatus::OllamaOnline { model } | ProviderStatus::OpenAiReady { model } => {
+                model.clone()
+            }
             _ => {
                 self.chat_provider = Some(provider);
                 return;
             }
         };
-        if let Err(e) = self
-            .shell
-            .retry_message(&message_id, Box::new(provider), &model)
-        {
+        if let Err(e) = self.shell.retry_message(&message_id, provider, &model) {
             tracing::error!(%e, "failed to retry message");
-            self.chat_provider = Some(HttpOllamaProvider::new("http://localhost:11434"));
+            self.chat_provider = self.resolve_active_chat_provider();
         }
         cx.notify();
     }
@@ -825,12 +853,18 @@ impl RoninWindow {
             Some(id) => id,
             None => return,
         };
-        let provider = match self.chat_provider.take() {
+        let provider = self
+            .chat_provider
+            .take()
+            .or_else(|| self.resolve_active_chat_provider());
+        let provider = match provider {
             Some(p) => p,
-            None => HttpOllamaProvider::new("http://localhost:11434"),
+            None => Box::new(HttpOllamaProvider::new("http://localhost:11434")),
         };
         let model = match &self.shell.state().provider_status {
-            ProviderStatus::OllamaOnline { model } => model.clone(),
+            ProviderStatus::OllamaOnline { model } | ProviderStatus::OpenAiReady { model } => {
+                model.clone()
+            }
             _ => {
                 self.chat_provider = Some(provider);
                 return;
@@ -838,10 +872,10 @@ impl RoninWindow {
         };
         if let Err(e) = self
             .shell
-            .regenerate_last_assistant(&thread_id, Box::new(provider), &model)
+            .regenerate_last_assistant(&thread_id, provider, &model)
         {
             tracing::error!(%e, "failed to regenerate message");
-            self.chat_provider = Some(HttpOllamaProvider::new("http://localhost:11434"));
+            self.chat_provider = self.resolve_active_chat_provider();
         }
         cx.notify();
     }
@@ -916,10 +950,13 @@ impl RoninWindow {
                     .font_weight(FontWeight(500.))
                     .child("Memories")
                     .hover(|style| style.bg(theme.surface_hover).cursor_pointer())
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                        this.memories_panel_open = !this.memories_panel_open;
-                        cx.notify();
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.memories_panel_open = !this.memories_panel_open;
+                            cx.notify();
+                        }),
+                    ),
             )
             .child(
                 div()
@@ -973,6 +1010,16 @@ impl RoninWindow {
             }
             ProviderStatus::OllamaNoModels => {
                 "Provider: ollama\nModel: none\n\nNo models installed.\nTry: ollama pull llama3.2"
+                    .to_string()
+            }
+            ProviderStatus::OpenAiReady { ref model } => {
+                format!("Provider: openai\nModel: {model}")
+            }
+            ProviderStatus::OpenAiError { ref message } => {
+                format!("Provider: openai\nModel: error\n\n{message}")
+            }
+            ProviderStatus::OpenAiNotConfigured => {
+                "Provider: openai\nModel: none\n\nOpenAI not configured.\nSet OPENAI_API_KEY environment variable or add it to settings."
                     .to_string()
             }
         }
@@ -1169,43 +1216,47 @@ impl RoninWindow {
             }
 
             let is_last_assistant = Some(&msg.id) == last_assistant_id.as_ref();
-            let mut message_actions = div().flex().flex_row().gap_3().child(
-                div()
-                    .text_xs()
-                    .text_color(if is_copied {
-                        theme.text_primary
-                    } else {
-                        theme.accent
-                    })
-                    .cursor_pointer()
-                    .child(copy_text)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener({
-                            let msg_id = msg.id.clone();
-                            let raw_content = raw_content.clone();
-                            move |this, _, _, cx| {
-                                this.copy_to_clipboard(msg_id.clone(), raw_content.clone(), cx);
-                            }
-                        }),
-                    ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.accent)
-                    .cursor_pointer()
-                    .child("Save as memory")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener({
-                            let raw_content = raw_content.clone();
-                            move |this, _, _, cx| {
-                                this.save_as_memory(raw_content.clone(), cx);
-                            }
-                        }),
-                    ),
-            );
+            let mut message_actions = div()
+                .flex()
+                .flex_row()
+                .gap_3()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if is_copied {
+                            theme.text_primary
+                        } else {
+                            theme.accent
+                        })
+                        .cursor_pointer()
+                        .child(copy_text)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener({
+                                let msg_id = msg.id.clone();
+                                let raw_content = raw_content.clone();
+                                move |this, _, _, cx| {
+                                    this.copy_to_clipboard(msg_id.clone(), raw_content.clone(), cx);
+                                }
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.accent)
+                        .cursor_pointer()
+                        .child("Save as memory")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener({
+                                let raw_content = raw_content.clone();
+                                move |this, _, _, cx| {
+                                    this.save_as_memory(raw_content.clone(), cx);
+                                }
+                            }),
+                        ),
+                );
 
             if msg.role == MessageRole::Assistant
                 && (msg.status == ronin_core::MessageStatus::Failed
@@ -1555,10 +1606,21 @@ impl RoninWindow {
         )
     }
 
-    fn render_memories_panel(&mut self, theme: &M0Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_memories_panel(
+        &mut self,
+        theme: &M0Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let memories = self.shell.list_memories().unwrap_or_default();
-        
-        let mut list = div().flex().flex_col().gap_2().id("memories-list").overflow_y_scroll().w_full().h_full();
+
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .id("memories-list")
+            .overflow_y_scroll()
+            .w_full()
+            .h_full();
         for mem in memories {
             let id = mem.id.clone();
             list = list.child(
@@ -1577,28 +1639,23 @@ impl RoninWindow {
                             .child(mem.content.chars().take(100).collect::<String>()),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_2()
-                            .mt_2()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.accent)
-                                    .cursor_pointer()
-                                    .child("Delete")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener({
-                                            let id = id.clone();
-                                            move |this, _, _, cx| {
-                                                this.shell.delete_memory(&id).ok();
-                                                cx.notify();
-                                            }
-                                        }),
-                                    ),
-                            ),
+                        div().flex().flex_row().gap_2().mt_2().child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.accent)
+                                .cursor_pointer()
+                                .child("Delete")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener({
+                                        let id = id.clone();
+                                        move |this, _, _, cx| {
+                                            this.shell.delete_memory(&id).ok();
+                                            cx.notify();
+                                        }
+                                    }),
+                                ),
+                        ),
                     ),
             );
         }
@@ -1617,16 +1674,24 @@ impl RoninWindow {
                 div()
                     .flex()
                     .justify_between()
-                    .child(div().text_xl().font_weight(FontWeight(600.)).child("Memories"))
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight(600.))
+                            .child("Memories"),
+                    )
                     .child(
                         div()
                             .text_xs()
                             .cursor_pointer()
                             .child("Close")
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                this.memories_panel_open = false;
-                                cx.notify();
-                            })),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.memories_panel_open = false;
+                                    cx.notify();
+                                }),
+                            ),
                     ),
             )
             .child(list)

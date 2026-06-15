@@ -258,3 +258,169 @@ fn shell_should_restore_previously_selected_model_from_config() {
         );
     }
 }
+
+#[test]
+fn shell_should_report_openai_ready_when_online_with_models() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+
+    struct FakeOpenAi;
+    impl OllamaProvider for FakeOpenAi {
+        fn name(&self) -> &'static str {
+            "openai"
+        }
+        fn check_health(&self) -> OllamaHealth {
+            OllamaHealth::Online
+        }
+        fn list_models(&self) -> Result<Vec<String>, ronin_core::RoninError> {
+            Ok(vec!["gpt-4o".into()])
+        }
+    }
+
+    let shell = RoninShell::open_with_ollama_provider(paths, FakeOpenAi).expect("open shell");
+    let state = shell.state();
+
+    assert_eq!(
+        state.provider_status,
+        ProviderStatus::OpenAiReady {
+            model: "gpt-4o".into()
+        }
+    );
+}
+
+#[test]
+fn shell_should_report_openai_not_configured_when_no_api_key() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+
+    struct FakeOpenAiNoKey;
+    impl OllamaProvider for FakeOpenAiNoKey {
+        fn name(&self) -> &'static str {
+            "openai"
+        }
+        fn check_health(&self) -> OllamaHealth {
+            OllamaHealth::Offline
+        }
+        fn list_models(&self) -> Result<Vec<String>, ronin_core::RoninError> {
+            Err(ronin_core::RoninError::Provider(
+                "No API key found. Set OPENAI_API_KEY or add a key in settings.".into(),
+            ))
+        }
+    }
+
+    let shell = RoninShell::open_with_ollama_provider(paths, FakeOpenAiNoKey).expect("open shell");
+    let state = shell.state();
+
+    assert_eq!(state.provider_status, ProviderStatus::OpenAiNotConfigured);
+}
+
+#[test]
+fn shell_should_report_openai_error_when_list_models_fails_with_other_error() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+
+    struct FakeOpenAiError;
+    impl OllamaProvider for FakeOpenAiError {
+        fn name(&self) -> &'static str {
+            "openai"
+        }
+        fn check_health(&self) -> OllamaHealth {
+            OllamaHealth::Offline
+        }
+        fn list_models(&self) -> Result<Vec<String>, ronin_core::RoninError> {
+            Err(ronin_core::RoninError::Provider(
+                "API Connection timeout".into(),
+            ))
+        }
+    }
+
+    let shell = RoninShell::open_with_ollama_provider(paths, FakeOpenAiError).expect("open shell");
+    let state = shell.state();
+
+    assert_eq!(
+        state.provider_status,
+        ProviderStatus::OpenAiError {
+            message: "API Connection timeout".into()
+        }
+    );
+}
+
+#[test]
+fn shell_should_resolve_thread_provider_and_model_falling_back_to_config_defaults() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    let toml_content = r#"
+[general]
+default_provider = "openai"
+default_model = "gpt-4o"
+"#;
+    std::fs::write(paths.config_dir.join("config.toml"), toml_content).unwrap();
+
+    let mut shell = RoninShell::open(paths.clone()).expect("open shell");
+
+    let thread1 = shell.create_new_thread().expect("create thread 1");
+    let (p1, m1) = shell
+        .resolve_thread_provider_and_model(&thread1.id)
+        .expect("resolve 1");
+    assert_eq!(p1, "openai");
+    assert_eq!(m1, "gpt-4o");
+
+    let thread2 = shell.create_new_thread().expect("create thread 2");
+    shell
+        .session()
+        .set_thread_provider(&thread2.id, "ollama")
+        .unwrap();
+    shell
+        .session()
+        .set_thread_model(&thread2.id, "llama3")
+        .unwrap();
+
+    // Create a new shell to load the threads with updated database fields
+    let shell2 = RoninShell::open(paths.clone()).expect("open shell 2");
+
+    let (p2, m2) = shell2
+        .resolve_thread_provider_and_model(&thread2.id)
+        .expect("resolve 2");
+    assert_eq!(p2, "ollama");
+    assert_eq!(m2, "llama3");
+}
+
+#[test]
+fn shell_should_refresh_provider_status_based_on_thread_settings() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    let toml_content = r#"
+[general]
+default_provider = "openai"
+default_model = "gpt-4o"
+"#;
+    std::fs::write(paths.config_dir.join("config.toml"), toml_content).unwrap();
+
+    let mut shell = RoninShell::open(paths).expect("open shell");
+    assert_eq!(shell.state().provider_status, ProviderStatus::NotConfigured);
+
+    shell.refresh_provider_status().unwrap();
+    assert_eq!(
+        shell.state().provider_status,
+        ProviderStatus::OpenAiNotConfigured
+    );
+}

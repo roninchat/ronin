@@ -49,6 +49,18 @@ pub enum ProviderStatus {
     },
     /// Ollama is reachable but no models are installed.
     OllamaNoModels,
+    /// OpenAI is configured, reachable and a model is selected.
+    OpenAiReady {
+        /// Name of the selected model.
+        model: String,
+    },
+    /// OpenAI provider health check or model list failed.
+    OpenAiError {
+        /// Sanitized error message.
+        message: String,
+    },
+    /// OpenAI is selected but no API key has been configured.
+    OpenAiNotConfigured,
 }
 
 /// M0 design checkpoint values shown to reviewers before deeper UI work.
@@ -81,6 +93,11 @@ pub enum StreamUpdate {
     Done(String),
     /// Streaming encountered an error.
     Error(String),
+    /// Move to the next turn (e.g. after a tool execution)
+    NextTurn {
+        /// The new assistant message ID to stream into.
+        new_assistant_msg_id: String,
+    },
 }
 
 /// Snapshot of state rendered by the native shell.
@@ -205,8 +222,8 @@ impl RoninShell {
         }
         let selected_thread_id = threads.first().map(|thread| thread.id.clone());
 
-        let provider_status = match provider.check_health() {
-            OllamaHealth::Online => match provider.list_models() {
+        let provider_status = if provider.name() == "openai" {
+            match provider.list_models() {
                 Ok(models) if !models.is_empty() => {
                     let saved = session.load_selected_model().unwrap_or(None);
                     let model = match saved {
@@ -214,28 +231,57 @@ impl RoninShell {
                         _ => models[0].clone(),
                     };
                     let _ = session.save_selected_model(&model);
+                    ProviderStatus::OpenAiReady { model }
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    if msg.contains("No API key found") {
+                        ProviderStatus::OpenAiNotConfigured
+                    } else {
+                        let clean_msg = match &err {
+                            ronin_core::RoninError::Provider(inner) => inner.clone(),
+                            _ => msg,
+                        };
+                        ProviderStatus::OpenAiError { message: clean_msg }
+                    }
+                }
+                _ => ProviderStatus::OpenAiError {
+                    message: "No models returned from OpenAI".to_string(),
+                },
+            }
+        } else {
+            match provider.check_health() {
+                OllamaHealth::Online => match provider.list_models() {
+                    Ok(models) if !models.is_empty() => {
+                        let saved = session.load_selected_model().unwrap_or(None);
+                        let model = match saved {
+                            Some(m) if models.contains(&m) => m,
+                            _ => models[0].clone(),
+                        };
+                        let _ = session.save_selected_model(&model);
+                        tracing::info!(
+                            thread_count = threads.len(),
+                            model_count = models.len(),
+                            selected_model = %model,
+                            "ronin shell state restored with ollama"
+                        );
+                        ProviderStatus::OllamaOnline { model }
+                    }
+                    _ => {
+                        tracing::info!(
+                            thread_count = threads.len(),
+                            "ollama online but no models installed"
+                        );
+                        ProviderStatus::OllamaNoModels
+                    }
+                },
+                OllamaHealth::Offline => {
                     tracing::info!(
                         thread_count = threads.len(),
-                        model_count = models.len(),
-                        selected_model = %model,
-                        "ronin shell state restored with ollama"
+                        "ollama not reachable — provider offline"
                     );
-                    ProviderStatus::OllamaOnline { model }
+                    ProviderStatus::OllamaOffline
                 }
-                _ => {
-                    tracing::info!(
-                        thread_count = threads.len(),
-                        "ollama online but no models installed"
-                    );
-                    ProviderStatus::OllamaNoModels
-                }
-            },
-            OllamaHealth::Offline => {
-                tracing::info!(
-                    thread_count = threads.len(),
-                    "ollama not reachable — provider offline"
-                );
-                ProviderStatus::OllamaOffline
             }
         };
 
@@ -318,6 +364,7 @@ impl RoninShell {
         self.state.selected_thread_id = Some(thread.id.clone());
         self.state.messages = self.session.list_messages(&thread.id).ok();
         self.state.threads.push(thread.clone());
+        let _ = self.refresh_provider_status();
         tracing::info!(thread_id = %thread.id, "ronin shell created and selected thread");
         Ok(thread)
     }
@@ -337,6 +384,7 @@ impl RoninShell {
 
         self.state.selected_thread_id = Some(thread_id.to_string());
         self.state.messages = self.session.list_messages(thread_id).ok();
+        let _ = self.refresh_provider_status();
         tracing::info!(thread_id, "ronin shell selected thread");
         Ok(())
     }
@@ -344,9 +392,21 @@ impl RoninShell {
     /// Selects a model and persists the choice to config.
     pub fn select_model(&mut self, model: &str) -> Result<()> {
         self.session.save_selected_model(model)?;
-        self.state.provider_status = ProviderStatus::OllamaOnline {
-            model: model.to_string(),
-        };
+        let is_openai = matches!(
+            self.state.provider_status,
+            ProviderStatus::OpenAiReady { .. }
+                | ProviderStatus::OpenAiError { .. }
+                | ProviderStatus::OpenAiNotConfigured
+        );
+        if is_openai {
+            self.state.provider_status = ProviderStatus::OpenAiReady {
+                model: model.to_string(),
+            };
+        } else {
+            self.state.provider_status = ProviderStatus::OllamaOnline {
+                model: model.to_string(),
+            };
+        }
         tracing::info!(model, "ronin shell selected model");
         Ok(())
     }
@@ -354,6 +414,112 @@ impl RoninShell {
     /// Returns current shell state.
     pub fn state(&self) -> &ShellState {
         &self.state
+    }
+
+    /// Returns a reference to the underlying session.
+    pub fn session(&self) -> &RoninSession {
+        &self.session
+    }
+
+    /// Resolves the provider and model for a given thread ID, falling back to global config defaults.
+    pub fn resolve_thread_provider_and_model(&self, thread_id: &str) -> Result<(String, String)> {
+        let thread = self
+            .state
+            .threads
+            .iter()
+            .find(|t| t.id == thread_id)
+            .ok_or_else(|| RoninAppError::ThreadNotLoaded {
+                thread_id: thread_id.to_string(),
+            })?;
+
+        let config = self.session.load_config()?;
+
+        let provider = thread
+            .provider
+            .clone()
+            .or_else(|| config.general.default_provider.clone())
+            .unwrap_or_else(|| "ollama".to_string());
+
+        let model = thread
+            .model
+            .clone()
+            .or_else(|| config.general.default_model.clone())
+            .unwrap_or_else(|| "llama3.2".to_string());
+
+        Ok((provider, model))
+    }
+
+    /// Binds to and checks health of the active provider for the selected thread, updating the status.
+    pub fn refresh_provider_status(&mut self) -> Result<()> {
+        let thread_id = match self.state.selected_thread_id.as_deref() {
+            Some(id) => id,
+            None => {
+                self.state.provider_status = ProviderStatus::NotConfigured;
+                return Ok(());
+            }
+        };
+
+        let (provider_name, _) = self.resolve_thread_provider_and_model(thread_id)?;
+        let config = self.session.load_config()?;
+
+        if provider_name == "openai" {
+            let base_url = config
+                .openai
+                .as_ref()
+                .and_then(|o| o.base_url.clone())
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let provider = ronin_core::OpenAiCompatibleProvider::new(&base_url);
+
+            let provider_status = match provider.list_models() {
+                Ok(models) if !models.is_empty() => {
+                    let saved = self.session.load_selected_model().unwrap_or(None);
+                    let model = match saved {
+                        Some(m) if models.contains(&m) => m,
+                        _ => models[0].clone(),
+                    };
+                    let _ = self.session.save_selected_model(&model);
+                    ProviderStatus::OpenAiReady { model }
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    if msg.contains("No API key found") {
+                        ProviderStatus::OpenAiNotConfigured
+                    } else {
+                        let clean_msg = match &err {
+                            ronin_core::RoninError::Provider(inner) => inner.clone(),
+                            _ => msg,
+                        };
+                        ProviderStatus::OpenAiError { message: clean_msg }
+                    }
+                }
+                _ => ProviderStatus::OpenAiError {
+                    message: "No models returned from OpenAI".to_string(),
+                },
+            };
+            self.state.provider_status = provider_status;
+        } else {
+            let base_url = config.ollama.base_url.clone();
+            let provider = ronin_core::HttpOllamaProvider::new(&base_url);
+
+            let provider_status = match provider.check_health() {
+                OllamaHealth::Online => match provider.list_models() {
+                    Ok(models) if !models.is_empty() => {
+                        let saved = self.session.load_selected_model().unwrap_or(None);
+                        let model = match saved {
+                            Some(m) if models.contains(&m) => m,
+                            _ => models[0].clone(),
+                        };
+                        let _ = self.session.save_selected_model(&model);
+                        ProviderStatus::OllamaOnline { model }
+                    }
+                    _ => ProviderStatus::OllamaNoModels,
+                },
+                OllamaHealth::Offline => ProviderStatus::OllamaOffline,
+            };
+            self.state.provider_status = provider_status;
+        }
+
+        Ok(())
     }
 
     /// Returns whether an assistant generation is currently active.
@@ -526,53 +692,205 @@ impl RoninShell {
         // 6. Spawn background thread for streaming
         let (tx, rx) = mpsc::channel();
         let session_clone = self.session.clone_session()?;
+        let thread_id_for_compile = thread_id.to_string();
+        let model_clone = model.to_string();
+        let attachment_context_block_clone = attachment_context_block(attachments);
 
         std::thread::spawn(move || {
-            let stream = match provider.stream_chat(&request) {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = tx.send(StreamUpdate::Error(e.to_string()));
-                    return;
-                }
-            };
+            let mut current_request = request;
+            let mut loop_count = 0;
+            const MAX_TOOL_LOOPS: usize = 5;
+            let mut previous_content = String::new();
+            let mut assistant_msg_id_for_thread = assistant_msg_id_for_thread;
 
-            let mut accumulated = String::new();
-            let mut chunk_count: usize = 0;
-            const DB_DEBOUNCE_INTERVAL: usize = 20;
-
-            for event in stream {
-                match event {
-                    ChatStreamEvent::Chunk(chunk) => {
-                        accumulated.push_str(&chunk);
-                        chunk_count += 1;
-
-                        // Debounced DB persistence — not every token.
-                        if chunk_count.is_multiple_of(DB_DEBOUNCE_INTERVAL) {
-                            let _ = session_clone
-                                .complete_message(&assistant_msg_id_for_thread, &accumulated);
-                        }
-
-                        // Send delta (individual token) to UI.
-                        if tx.send(StreamUpdate::Chunk(chunk)).is_err() {
-                            return; // Receiver dropped
-                        }
-                    }
-                    ChatStreamEvent::Error(e) => {
-                        // Persist what we have before reporting error.
-                        let _ = session_clone.fail_message(
-                            &assistant_msg_id_for_thread,
-                            &accumulated,
-                            &e,
-                        );
-                        let _ = tx.send(StreamUpdate::Error(e));
+            loop {
+                let stream = match provider.stream_chat(&current_request) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(StreamUpdate::Error(e.to_string()));
                         return;
                     }
-                }
-            }
+                };
 
-            // Final DB write with complete content.
-            let _ = session_clone.complete_message(&assistant_msg_id_for_thread, &accumulated);
-            let _ = tx.send(StreamUpdate::Done(accumulated));
+                let mut accumulated = String::new();
+                let mut chunk_count: usize = 0;
+                const DB_DEBOUNCE_INTERVAL: usize = 20;
+
+                for event in stream {
+                    match event {
+                        ChatStreamEvent::Chunk(chunk) => {
+                            accumulated.push_str(&chunk);
+                            chunk_count += 1;
+
+                            // Debounced DB persistence.
+                            if chunk_count.is_multiple_of(DB_DEBOUNCE_INTERVAL) {
+                                let _ = session_clone.complete_message(
+                                    &assistant_msg_id_for_thread,
+                                    &format!("{}{}", previous_content, accumulated),
+                                );
+                            }
+
+                            // Send delta to UI.
+                            if tx.send(StreamUpdate::Chunk(chunk)).is_err() {
+                                return; // Receiver dropped
+                            }
+                        }
+                        ChatStreamEvent::Error(e) => {
+                            let _ = session_clone.fail_message(
+                                &assistant_msg_id_for_thread,
+                                &format!("{}{}", previous_content, accumulated),
+                                &e,
+                            );
+                            let _ = tx.send(StreamUpdate::Error(e));
+                            return;
+                        }
+                    }
+                }
+
+                let full_assistant_content = format!("{}{}", previous_content, accumulated);
+                let _ = session_clone
+                    .complete_message(&assistant_msg_id_for_thread, &full_assistant_content);
+
+                if loop_count < MAX_TOOL_LOOPS {
+                    if let Some(tool_call) = parse_unexecuted_tool_call(&accumulated) {
+                        loop_count += 1;
+                        let tool_result = match tool_call {
+                            ToolCall::ListMemories => match session_clone.list_memories() {
+                                Ok(mems) => {
+                                    let mut res = String::from("ID, Title\n");
+                                    for m in mems {
+                                        res.push_str(&format!("{}, {}\n", m.id.0, m.title));
+                                    }
+                                    format!("[TOOL_RESULT: list_memories, result: {:?}]", res)
+                                }
+                                Err(e) => format!(
+                                    "[TOOL_RESULT: list_memories, error: {:?}]",
+                                    e.to_string()
+                                ),
+                            },
+                            ToolCall::GetMemory(id) => match session_clone.list_memories() {
+                                Ok(mems) => {
+                                    if let Some(m) = mems.into_iter().find(|m| m.id.0 == id) {
+                                        format!(
+                                            "[TOOL_RESULT: get_memory, result: {:?}]",
+                                            m.content
+                                        )
+                                    } else {
+                                        String::from("[TOOL_RESULT: get_memory, error: \"Memory not found\"]")
+                                    }
+                                }
+                                Err(e) => {
+                                    format!("[TOOL_RESULT: get_memory, error: {:?}]", e.to_string())
+                                }
+                            },
+                        };
+
+                        // 1. Finalize the current assistant message
+                        let _ = session_clone.complete_message(
+                            &assistant_msg_id_for_thread,
+                            &full_assistant_content,
+                        );
+
+                        // 2. Create the system message for tool result
+                        let _system_msg = match session_clone.create_message(
+                            &thread_id_for_compile,
+                            MessageRole::System,
+                            &tool_result,
+                        ) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                let _ = tx.send(StreamUpdate::Error(e.to_string()));
+                                return;
+                            }
+                        };
+
+                        // 3. Create the new assistant message placeholder
+                        let new_assistant_msg = match session_clone
+                            .create_streaming_message(&thread_id_for_compile, "")
+                        {
+                            Ok(m) => m,
+                            Err(e) => {
+                                let _ = tx.send(StreamUpdate::Error(e.to_string()));
+                                return;
+                            }
+                        };
+                        let new_assistant_msg_id = new_assistant_msg.id.clone();
+
+                        // 4. Send NextTurn to UI
+                        if tx
+                            .send(StreamUpdate::NextTurn {
+                                new_assistant_msg_id: new_assistant_msg_id.clone(),
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+
+                        // Update loop state for next turn
+                        assistant_msg_id_for_thread = new_assistant_msg_id;
+                        previous_content = String::new();
+
+                        // Compile request for next turn
+                        let all_msgs = match session_clone.list_messages(&thread_id_for_compile) {
+                            Ok(msgs) => msgs,
+                            Err(e) => {
+                                let _ = tx.send(StreamUpdate::Error(e.to_string()));
+                                return;
+                            }
+                        };
+
+                        let mut included = Vec::new();
+                        let mut total_chars = 0usize;
+                        for msg in all_msgs.iter().rev() {
+                            if msg.id == assistant_msg_id_for_thread {
+                                continue;
+                            }
+                            if included.len() >= MAX_MESSAGES {
+                                break;
+                            }
+                            let msg_chars = msg.content.chars().count();
+                            if total_chars + msg_chars > MAX_CHARS {
+                                break;
+                            }
+                            total_chars += msg_chars;
+                            included.push(msg);
+                        }
+                        included.reverse();
+
+                        let mut chat_messages = vec![ronin_core::ChatMessage {
+                            role: "system".to_string(),
+                            content: ronin_core::RONIN_SYSTEM_PROMPT.to_string(),
+                        }];
+                        if let Some(context) = attachment_context_block_clone.clone() {
+                            chat_messages.push(ronin_core::ChatMessage {
+                                role: "system".to_string(),
+                                content: context,
+                            });
+                        }
+                        chat_messages.extend(included.into_iter().map(|m| {
+                            ronin_core::ChatMessage {
+                                role: match m.role {
+                                    MessageRole::User => "user".to_string(),
+                                    MessageRole::Assistant => "assistant".to_string(),
+                                    MessageRole::System => "system".to_string(),
+                                },
+                                content: m.content.clone(),
+                            }
+                        }));
+
+                        current_request = ChatRequest {
+                            model: model_clone.clone(),
+                            messages: chat_messages,
+                            system_prompt: Some(ronin_core::RONIN_SYSTEM_PROMPT.to_string()),
+                        };
+
+                        continue;
+                    }
+                }
+
+                let _ = tx.send(StreamUpdate::Done(full_assistant_content));
+                break;
+            }
         });
 
         self.streaming_rx = Some(rx);
@@ -612,6 +930,23 @@ impl RoninShell {
                         }
                     }
                     // Continue draining — more chunks may be ready.
+                }
+                Ok(StreamUpdate::NextTurn {
+                    new_assistant_msg_id,
+                }) => {
+                    if let Some(ref mut msgs) = self.state.messages {
+                        if let Some(msg) = msgs.iter_mut().find(|m| m.id == msg_id) {
+                            msg.status = MessageStatus::Complete;
+                        }
+                    }
+                    if let Ok(all_msgs) = self
+                        .session
+                        .list_messages(self.state.selected_thread_id.as_ref().unwrap())
+                    {
+                        self.state.messages = Some(all_msgs);
+                    }
+                    self.streaming_msg_id = Some(new_assistant_msg_id);
+                    return true;
                 }
                 Ok(StreamUpdate::Done(_final_content)) => {
                     if let Some(ref mut msgs) = self.state.messages {
@@ -903,48 +1238,163 @@ impl RoninShell {
 
         // 6. Update shell state with current messages
         self.state.messages = Some(all_msgs);
-
         let request = ChatRequest {
             model: model.to_string(),
             messages: chat_messages,
             system_prompt: Some(ronin_core::RONIN_SYSTEM_PROMPT.to_string()),
         };
 
-        // 7. Stream response
-        let mut accumulated = String::new();
-        let stream = provider.stream_chat(&request)?;
-        for event in stream {
-            match event {
-                ChatStreamEvent::Chunk(chunk) => {
-                    accumulated.push_str(&chunk);
-                    // TODO(#6): debounce DB updates, only update on batches
-                    let _ = self
-                        .session
-                        .complete_message(&assistant_msg.id, &accumulated);
-                    // Update in-memory state
-                    if let Some(ref mut msgs) = self.state.messages {
-                        if let Some(msg) = msgs.iter_mut().find(|m| m.id == assistant_msg.id) {
-                            msg.content.push_str(&chunk);
+        // 7. Stream response loop supporting tool calling
+        let mut current_request = request;
+        let mut loop_count = 0;
+        const MAX_TOOL_LOOPS: usize = 5;
+        let mut previous_content = String::new();
+        let mut assistant_msg_id = assistant_msg.id.clone();
+
+        loop {
+            let mut accumulated = String::new();
+            let stream = provider.stream_chat(&current_request)?;
+            for event in stream {
+                match event {
+                    ChatStreamEvent::Chunk(chunk) => {
+                        accumulated.push_str(&chunk);
+                        let full_content = format!("{}{}", previous_content, accumulated);
+                        let _ = self
+                            .session
+                            .complete_message(&assistant_msg_id, &full_content);
+                        if let Some(ref mut msgs) = self.state.messages {
+                            if let Some(msg) = msgs.iter_mut().find(|m| m.id == assistant_msg_id) {
+                                msg.content = full_content;
+                            }
                         }
                     }
-                }
-                ChatStreamEvent::Error(e) => {
-                    tracing::error!(thread_id, "provider stream error: {e}");
-                    self.session
-                        .complete_message(&assistant_msg.id, &accumulated)?;
-                    return Err(RoninAppError::Session(RoninError::Provider(e)));
+                    ChatStreamEvent::Error(err) => {
+                        if let Some(ref mut msgs) = self.state.messages {
+                            if let Some(msg) = msgs.iter_mut().find(|m| m.id == assistant_msg_id) {
+                                msg.status = MessageStatus::Failed;
+                                msg.error_message = Some(err.clone());
+                            }
+                        }
+                        return Err(RoninAppError::Session(RoninError::Provider(err)));
+                    }
                 }
             }
-        }
 
-        // 8. Finalize assistant message as complete
-        self.session
-            .complete_message(&assistant_msg.id, &accumulated)?;
-        if let Some(ref mut msgs) = self.state.messages {
-            if let Some(msg) = msgs.iter_mut().find(|m| m.id == assistant_msg.id) {
-                msg.content = accumulated;
-                msg.status = MessageStatus::Complete;
+            let full_assistant_content = format!("{}{}", previous_content, accumulated);
+            self.session
+                .complete_message(&assistant_msg_id, &full_assistant_content)?;
+            if let Some(ref mut msgs) = self.state.messages {
+                if let Some(msg) = msgs.iter_mut().find(|m| m.id == assistant_msg_id) {
+                    msg.content = full_assistant_content.clone();
+                }
             }
+
+            if loop_count < MAX_TOOL_LOOPS {
+                if let Some(tool_call) = parse_unexecuted_tool_call(&accumulated) {
+                    loop_count += 1;
+                    let tool_result = match tool_call {
+                        ToolCall::ListMemories => match self.session.list_memories() {
+                            Ok(mems) => {
+                                let mut res = String::from("ID, Title\n");
+                                for m in mems {
+                                    res.push_str(&format!("{}, {}\n", m.id.0, m.title));
+                                }
+                                format!("[TOOL_RESULT: list_memories, result: {:?}]", res)
+                            }
+                            Err(e) => {
+                                format!("[TOOL_RESULT: list_memories, error: {:?}]", e.to_string())
+                            }
+                        },
+                        ToolCall::GetMemory(id) => match self.session.list_memories() {
+                            Ok(mems) => {
+                                if let Some(m) = mems.into_iter().find(|m| m.id.0 == id) {
+                                    format!("[TOOL_RESULT: get_memory, result: {:?}]", m.content)
+                                } else {
+                                    String::from(
+                                        "[TOOL_RESULT: get_memory, error: \"Memory not found\"]",
+                                    )
+                                }
+                            }
+                            Err(e) => {
+                                format!("[TOOL_RESULT: get_memory, error: {:?}]", e.to_string())
+                            }
+                        },
+                    };
+
+                    // 1. Finalize the current assistant message
+                    self.session
+                        .complete_message(&assistant_msg_id, &full_assistant_content)?;
+
+                    // 2. Create the system message for tool result
+                    self.session
+                        .create_message(thread_id, MessageRole::System, &tool_result)?;
+
+                    // 3. Create the new assistant message placeholder
+                    let new_assistant_msg = self.session.create_streaming_message(thread_id, "")?;
+                    assistant_msg_id = new_assistant_msg.id.clone();
+
+                    // Update UI messages state
+                    self.state.messages = Some(self.session.list_messages(thread_id)?);
+
+                    // Reset previous content
+                    previous_content = String::new();
+
+                    // Compile request for next turn
+                    let all_msgs = self.session.list_messages(thread_id)?;
+                    let mut included = Vec::new();
+                    let mut total_chars = 0usize;
+                    for msg in all_msgs.iter().rev() {
+                        if msg.id == assistant_msg_id {
+                            continue;
+                        }
+                        if included.len() >= MAX_MESSAGES {
+                            break;
+                        }
+                        let msg_chars = msg.content.chars().count();
+                        if total_chars + msg_chars > MAX_CHARS {
+                            break;
+                        }
+                        total_chars += msg_chars;
+                        included.push(msg);
+                    }
+                    included.reverse();
+
+                    let mut chat_messages = vec![ronin_core::ChatMessage {
+                        role: "system".to_string(),
+                        content: ronin_core::RONIN_SYSTEM_PROMPT.to_string(),
+                    }];
+                    if let Some(context) = attachment_context_block(attachments) {
+                        chat_messages.push(ronin_core::ChatMessage {
+                            role: "system".to_string(),
+                            content: context,
+                        });
+                    }
+                    chat_messages.extend(included.into_iter().map(|m| ronin_core::ChatMessage {
+                        role: match m.role {
+                            MessageRole::User => "user".to_string(),
+                            MessageRole::Assistant => "assistant".to_string(),
+                            MessageRole::System => "system".to_string(),
+                        },
+                        content: m.content.clone(),
+                    }));
+
+                    current_request = ChatRequest {
+                        model: model.to_string(),
+                        messages: chat_messages,
+                        system_prompt: Some(ronin_core::RONIN_SYSTEM_PROMPT.to_string()),
+                    };
+
+                    continue;
+                }
+            }
+
+            // Completed final turn
+            if let Some(ref mut msgs) = self.state.messages {
+                if let Some(msg) = msgs.iter_mut().find(|m| m.id == assistant_msg_id) {
+                    msg.status = MessageStatus::Complete;
+                }
+            }
+            break;
         }
 
         tracing::info!(
@@ -957,7 +1407,9 @@ impl RoninShell {
 
     /// Creates a new memory with the given title and content.
     pub fn create_memory(&self, title: &str, content: &str) -> Result<ronin_core::Memory> {
-        self.session.create_memory(title, content).map_err(Into::into)
+        self.session
+            .create_memory(title, content)
+            .map_err(Into::into)
     }
 
     /// Lists all memories.
@@ -971,7 +1423,49 @@ impl RoninShell {
     }
 
     /// Updates a memory by ID.
-    pub fn update_memory(&self, id: &ronin_core::MemoryId, title: &str, content: &str) -> Result<()> {
-        self.session.update_memory(id, title, content).map_err(Into::into)
+    pub fn update_memory(
+        &self,
+        id: &ronin_core::MemoryId,
+        title: &str,
+        content: &str,
+    ) -> Result<()> {
+        self.session
+            .update_memory(id, title, content)
+            .map_err(Into::into)
     }
+}
+
+enum ToolCall {
+    ListMemories,
+    GetMemory(String),
+}
+
+fn parse_unexecuted_tool_call(text: &str) -> Option<ToolCall> {
+    let marker = "[TOOL_CALL:";
+    if let Some(pos) = text.rfind(marker) {
+        let rest = &text[pos..];
+        if rest.contains("[TOOL_RESULT:") {
+            return None;
+        }
+
+        let call_content_str = &text[pos + marker.len()..];
+        if let Some(end_pos) = call_content_str.find(']') {
+            let call_content = &call_content_str[..end_pos];
+            let parts: Vec<&str> = call_content.split(',').map(|s| s.trim()).collect();
+            if !parts.is_empty() {
+                let tool_name = parts[0].to_lowercase();
+                if tool_name == "list_memories" {
+                    return Some(ToolCall::ListMemories);
+                } else if tool_name == "get_memory" {
+                    for part in &parts[1..] {
+                        if let Some(stripped) = part.strip_prefix("id:") {
+                            let id = stripped.trim().trim_matches('"').trim_matches('\'');
+                            return Some(ToolCall::GetMemory(id.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }

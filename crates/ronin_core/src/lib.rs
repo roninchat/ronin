@@ -25,6 +25,10 @@ pub enum OllamaHealth {
 
 /// Provider boundary for querying Ollama status and available models.
 pub trait OllamaProvider {
+    /// Opaque name for identifying this provider type (e.g. "ollama", "openai").
+    fn name(&self) -> &'static str {
+        "ollama"
+    }
     /// Checks whether the Ollama server is reachable.
     fn check_health(&self) -> OllamaHealth;
     /// Lists available model names from the provider.
@@ -324,13 +328,30 @@ pub trait ChatProvider {
 }
 
 /// System prompt describing Ronin's capability boundary.
-pub const RONIN_SYSTEM_PROMPT: &str = "\
-You are Ronin, a local AI assistant running on Linux. \
-You run offline via Ollama and have no internet access. \
-You cannot browse the web, fetch URLs, run shell commands, \
-or access files on the user's system unless they paste content \
-into the chat. Answer concisely and truthfully. \
-When you don't know something, say so.";
+pub const RONIN_SYSTEM_PROMPT: &str = r#"You are Ronin, a local AI assistant on Linux.
+Answer questions directly, concisely, and truthfully.
+You do not have user memories in your context by default.
+Instead, you can use these tools to search and fetch user memories:
+
+- `[TOOL_CALL: list_memories]`: Returns a list of all memory IDs and titles. Use this to find what memories exist.
+- `[TOOL_CALL: get_memory, id: "<id>"]`: Returns the content of a specific memory by ID. Use this to read the details of a memory.
+
+When you call a tool, stop generation immediately. The system will append the tool results as `[TOOL_RESULT: ...]`. You must then continue generation in your next turn using the fetched information.
+
+Examples:
+1. User: "What is my name?"
+You: "Let me check your memories. [TOOL_CALL: list_memories]"
+System: "[TOOL_RESULT: list_memories, result: "ID, Title\n019ecc48, User's Name\n"]"
+You: "I found a memory about your name. Let me fetch it. [TOOL_CALL: get_memory, id: "019ecc48"]"
+System: "[TOOL_RESULT: get_memory, result: "Alice"]"
+You: "Your name is Alice."
+
+2. User: "Do I like coffee?"
+You: "Let me check your memories. [TOOL_CALL: list_memories]"
+System: "[TOOL_RESULT: list_memories, result: "ID, Title\n019ecc48, Food Preferences\n"]"
+You: "Let me fetch your food preferences. [TOOL_CALL: get_memory, id: "019ecc48"]"
+System: "[TOOL_RESULT: get_memory, result: "Prefers tea over coffee"]"
+You: "No, according to your preferences, you prefer tea over coffee.""#;
 
 /// HTTP-based Ollama provider that queries the Ollama REST API.
 pub struct HttpOllamaProvider {
@@ -696,6 +717,10 @@ impl ChatProvider for OpenAiCompatibleProvider {
 }
 
 impl OllamaProvider for OpenAiCompatibleProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+
     fn check_health(&self) -> OllamaHealth {
         let key = match self.get_api_key() {
             Ok(k) => k,
@@ -742,15 +767,50 @@ impl OllamaProvider for OpenAiCompatibleProvider {
 }
 
 /// Configuration for the OpenAI provider.
-#[derive(serde::Deserialize, Default, Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone)]
 pub struct OpenAiConfig {
     /// Base URL for the OpenAI-compatible API endpoint.
     pub base_url: Option<String>,
 }
 
+/// General preferences.
+#[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone)]
+pub struct GeneralConfig {
+    /// Default AI provider.
+    pub default_provider: Option<String>,
+    /// Default model name.
+    pub default_model: Option<String>,
+}
+
+/// Ollama provider config.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct OllamaConfig {
+    /// Base URL for Ollama.
+    #[serde(default = "default_ollama_base_url")]
+    pub base_url: String,
+}
+
+fn default_ollama_base_url() -> String {
+    "http://localhost:11434".to_string()
+}
+
+impl Default for OllamaConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_ollama_base_url(),
+        }
+    }
+}
+
 /// The root configuration object loaded from config.toml.
-#[derive(serde::Deserialize, Default, Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone)]
 pub struct RoninConfig {
+    /// General preferences.
+    #[serde(default)]
+    pub general: GeneralConfig,
+    /// Ollama provider configuration.
+    #[serde(default)]
+    pub ollama: OllamaConfig,
     /// OpenAI provider configuration.
     pub openai: Option<OpenAiConfig>,
 }
@@ -813,6 +873,10 @@ pub struct Thread {
     pub updated_at: i64,
     /// Whether the thread is archived. M0 stores this but has no UI for it yet.
     pub archived: bool,
+    /// Opaque identifier for the AI provider (e.g. "ollama", "openai").
+    pub provider: Option<String>,
+    /// Selected model name.
+    pub model: Option<String>,
 }
 
 /// Role of a chat message.
@@ -983,8 +1047,12 @@ impl RoninSession {
 
     /// Creates a new user-visible thread titled `New Chat` and persists it.
     pub fn create_thread(&self) -> Result<Thread> {
+        let config = self.load_config()?;
         self.db
-            .create_thread()
+            .create_thread_with_provider(
+                config.general.default_provider.as_deref(),
+                config.general.default_model.as_deref(),
+            )
             .map(Thread::from)
             .map_err(Into::into)
     }
@@ -1001,6 +1069,20 @@ impl RoninSession {
     pub fn update_thread_title(&self, thread_id: &str, title: &str) -> Result<()> {
         self.db
             .update_thread_title(thread_id, title)
+            .map_err(Into::into)
+    }
+
+    /// Updates a thread's provider and bumps its updated_at timestamp.
+    pub fn set_thread_provider(&self, thread_id: &str, provider: &str) -> Result<()> {
+        self.db
+            .update_thread_provider(thread_id, Some(provider))
+            .map_err(Into::into)
+    }
+
+    /// Updates a thread's model and bumps its updated_at timestamp.
+    pub fn set_thread_model(&self, thread_id: &str, model: &str) -> Result<()> {
+        self.db
+            .update_thread_model(thread_id, Some(model))
             .map_err(Into::into)
     }
 
@@ -1066,19 +1148,8 @@ impl RoninSession {
 
     /// Loads the previously selected Ollama model from config, if any.
     pub fn load_selected_model(&self) -> Result<Option<String>> {
-        let config_path = self.paths.config_dir.join("ronin_config.json");
-        if !config_path.is_file() {
-            return Ok(None);
-        }
-        let data = fs::read_to_string(&config_path)
-            .map_err(|e| RoninError::Config(format!("read config: {e}")))?;
-        #[derive(serde::Deserialize)]
-        struct Config {
-            selected_model: Option<String>,
-        }
-        let config: Config = serde_json::from_str(&data)
-            .map_err(|e| RoninError::Config(format!("parse config: {e}")))?;
-        Ok(config.selected_model)
+        let config = self.load_config()?;
+        Ok(config.general.default_model)
     }
 
     /// Creates an independent session handle pointing at the same database.
@@ -1091,15 +1162,10 @@ impl RoninSession {
 
     /// Saves the selected Ollama model to config.
     pub fn save_selected_model(&self, model: &str) -> Result<()> {
-        let config_path = self.paths.config_dir.join("ronin_config.json");
-        #[derive(serde::Serialize)]
-        struct Config {
-            selected_model: String,
-        }
-        let config = Config {
-            selected_model: model.to_string(),
-        };
-        let data = serde_json::to_string_pretty(&config)
+        let mut config = self.load_config()?;
+        config.general.default_model = Some(model.to_string());
+        let config_path = self.paths.config_dir.join("config.toml");
+        let data = toml::to_string_pretty(&config)
             .map_err(|e| RoninError::Config(format!("serialize config: {e}")))?;
         fs::write(&config_path, data)
             .map_err(|e| RoninError::Config(format!("write config: {e}")))?;
@@ -1216,6 +1282,8 @@ impl From<DbThread> for Thread {
             created_at: thread.created_at,
             updated_at: thread.updated_at,
             archived: thread.archived,
+            provider: thread.provider,
+            model: thread.model,
         }
     }
 }
