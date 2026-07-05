@@ -24,3 +24,8 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
+criterion = "0.5"
+
+[[bench]]
+name = "composer_perf"
+harness = false
