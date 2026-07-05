@@ -45,3 +45,4 @@ core.*
 # OS/filesystem noise
 .DS_Store
 Thumbs.db
+.agents
