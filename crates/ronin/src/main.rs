@@ -1,12 +1,13 @@
 use std::process::ExitCode;
 
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, FocusHandle, FontWeight,
+    div, prelude::*, px, size, App, Application, Bounds, Context, FocusHandle, FontWeight,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollHandle,
     SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 use ronin::{
-    composer::ComposerEditor, parse_launch_intent, ronin_paths, LaunchIntent, LauncherError,
+    completions, composer::ComposerEditor, parse_launch_intent, ronin_paths, theme::M0Theme,
+    LaunchIntent, LauncherError,
 };
 use ronin_app::{ProviderStatus, RoninAppError, RoninShell, ShellState};
 use ronin_core::{
@@ -316,170 +317,27 @@ impl RoninWindow {
 
     // ── completions ──
 
-    fn command_completion(&self) -> Option<(String, String, usize, usize)> {
-        let cursor = self.composer.cursor();
-        let text = self.composer.text();
-        let ts = text[..cursor]
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let token = &text[ts..cursor];
-        if !token.starts_with('@') {
-            return None;
-        }
-        let tl = token.to_ascii_lowercase();
-        [
-            ("@file:", "Attach file"),
-            ("@memory:", "Attach memory"),
-            ("@clipboard", "Attach clipboard"),
-        ]
-        .iter()
-        .find(|(c, _)| c.to_ascii_lowercase().starts_with(&tl) && *c != tl)
-        .map(|(c, l)| (c.to_string(), l.to_string(), ts, cursor))
+    fn command_completion(&self) -> Option<completions::CommandCompletion> {
+        completions::command_completion(self.composer.text(), self.composer.cursor())
     }
 
     fn memory_completions(&self) -> Vec<(String, String)> {
-        let cursor = self.composer.cursor();
-        let text = self.composer.text();
-        let ts = text[..cursor]
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let token = &text[ts..cursor];
-        let prefix = match token.strip_prefix("@memory:") {
-            Some(p) => p,
+        let prefix = match completions::memory_completion_prefix(
+            self.composer.text(),
+            self.composer.cursor(),
+        ) {
+            Some(p) => p.to_string(),
             None => return Vec::new(),
         };
-
         let memories = self.shell.list_memories().unwrap_or_default();
-        let mut matches: Vec<(String, String)> = memories
-            .into_iter()
-            .filter(|m| {
-                m.id.0.starts_with(prefix)
-                    || m.title.to_lowercase().contains(&prefix.to_lowercase())
-            })
-            .map(|m| (m.id.0, m.title))
-            .collect();
-        matches.truncate(8);
-        matches
+        completions::filter_memory_completions(
+            &prefix,
+            memories.into_iter().map(|m| (m.id.0, m.title)),
+        )
     }
 
     fn file_path_completions(&self) -> Vec<String> {
-        let cursor = self.composer.cursor();
-        let text = self.composer.text();
-        let ts = text[..cursor]
-            .rfind(char::is_whitespace)
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let token = &text[ts..cursor];
-        let prefix = match token.strip_prefix("@file:") {
-            Some(p) => {
-                if p.starts_with('"') {
-                    p.strip_prefix('"').unwrap().trim_end_matches('"')
-                } else {
-                    p
-                }
-            }
-            None => return Vec::new(),
-        };
-
-        // Normalize: strip trailing / to get dir, extract file name prefix
-        let prefix_path = std::path::Path::new(prefix);
-        let (dir, file_prefix) = if prefix.is_empty() || prefix == "/" {
-            // Empty or just "/" — list root or home
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-            (std::path::PathBuf::from(home), String::new())
-        } else if prefix.ends_with('/') {
-            // Explicit directory — list its contents
-            let d = prefix_path.to_path_buf();
-            if d.is_dir() {
-                (d, String::new())
-            } else {
-                // Try resolving via HOME
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-                let full = std::path::PathBuf::from(&home).join(prefix_path);
-                if full.is_dir() {
-                    (full, String::new())
-                } else {
-                    (
-                        full.parent()
-                            .map(|p| p.to_path_buf())
-                            .unwrap_or_else(|| std::path::PathBuf::from(&home)),
-                        full.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    )
-                }
-            }
-        } else if prefix_path.is_dir() {
-            // Path is an existing directory — list its contents
-            (prefix_path.to_path_buf(), String::new())
-        } else {
-            // Path is a partial — get parent dir and file name prefix
-            let parent = prefix_path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-                    std::path::PathBuf::from(&home)
-                });
-            // If prefix starts with /, resolve absolute; otherwise try relative then HOME fallback
-            let dir = if prefix.starts_with('/') {
-                parent
-            } else if parent.as_os_str().is_empty() {
-                // Just a filename — search cwd first, fallback to HOME
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-            } else if parent.is_dir() {
-                parent
-            } else {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-                let full = std::path::PathBuf::from(&home).join(&parent);
-                if full.is_dir() {
-                    full
-                } else {
-                    parent
-                }
-            };
-            let fname = prefix_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-            (dir, fname)
-        };
-
-        let file_prefix_lower = file_prefix.to_ascii_lowercase();
-
-        let mut matches = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                // Filter . and ..
-                if name == "." || name == ".." {
-                    continue;
-                }
-                // Case-insensitive prefix match
-                let name_lower = name.to_ascii_lowercase();
-                if !file_prefix_lower.is_empty() && !name_lower.starts_with(&file_prefix_lower) {
-                    continue;
-                }
-                let suffix = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    "/"
-                } else {
-                    ""
-                };
-                matches.push(format!("{name}{suffix}"));
-            }
-        }
-        matches.sort_by(|a, b| {
-            // Directories first, then alphabetical
-            let a_dir = a.ends_with('/');
-            let b_dir = b.ends_with('/');
-            b_dir.cmp(&a_dir).then_with(|| a.cmp(b))
-        });
-        matches.truncate(8);
-        matches
+        completions::file_path_completions(self.composer.text(), self.composer.cursor())
     }
 
     fn accept_command_completion(&mut self) -> bool {
@@ -537,33 +395,7 @@ impl RoninWindow {
             .map(|q| q.trim_end_matches('"'))
             .unwrap_or(prefix);
 
-        // Build directory prefix: include trailing /
-        let base_path = std::path::Path::new(base);
-        let dir_str = if base.ends_with('/') {
-            // Already has trailing / — keep dir as-is
-            if base == "/" || base.is_empty() {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-                format!("{home}/")
-            } else {
-                base.to_string()
-            }
-        } else if base.is_empty() {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-            format!("{home}/")
-        } else if base_path.is_dir() {
-            format!("{base}/")
-        } else {
-            base_path
-                .parent()
-                .and_then(|p| p.to_str())
-                .filter(|d| !d.is_empty())
-                .map(|d| format!("{d}/"))
-                .unwrap_or_else(|| {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-                    format!("{home}/")
-                })
-        };
-
+        let dir_str = completions::completion_dir_prefix(base);
         let repl = format!("{head}{dir_str}{chosen}");
         self.composer.replace_range(ts, cursor, &repl);
         self.completion_index = 0;
@@ -937,6 +769,7 @@ impl RoninWindow {
                 .py_2()
                 .bg(row_bg)
                 .text_color(theme.text_primary)
+                .truncate()
                 .child(thread.title.clone())
                 .hover(|style| style.bg(theme.surface_hover).cursor_pointer())
                 .on_mouse_up(MouseButton::Left, {
@@ -1112,7 +945,7 @@ impl RoninWindow {
             let raw_content = msg.content.clone();
             let is_copied = self.copied_state.as_ref().map(|(id, _)| id) == Some(&msg.id);
             let copy_text = if is_copied { "Copied!" } else { "Copy" };
-            let mut message_body = div().w_full().flex().flex_col().gap_3();
+            let mut message_body = div().w_full().min_w_0().flex().flex_col().gap_3();
 
             let blocks = if let Some((len, cached_blocks)) = self.parsed_messages.get(&msg.id) {
                 if *len == msg.content.len() {
@@ -1133,30 +966,7 @@ impl RoninWindow {
             for (block_idx, block) in blocks.into_iter().enumerate() {
                 let block_el = match block {
                     ronin::markdown::MarkdownBlock::Paragraph(inlines) => {
-                        let mut p = div().w_full().flex().flex_row().flex_wrap().gap_1();
-                        for inline in inlines {
-                            match inline {
-                                ronin::markdown::Inline::Text(text) => {
-                                    for word in text.split(' ') {
-                                        if !word.is_empty() {
-                                            p = p.child(div().child(word.to_string()));
-                                        }
-                                    }
-                                }
-                                ronin::markdown::Inline::Code(code) => {
-                                    p = p.child(
-                                        div()
-                                            .bg(theme.surface_muted)
-                                            .rounded_sm()
-                                            .px_1()
-                                            .font_family("Courier New")
-                                            .text_color(theme.accent)
-                                            .child(code),
-                                    );
-                                }
-                            }
-                        }
-                        p
+                        ronin::markdown_view::render_inline_flow(&inlines, theme)
                     }
                     ronin::markdown::MarkdownBlock::CodeBlock { language, content } => {
                         let lang_label = language.unwrap_or_else(|| "text".to_string());
@@ -1216,6 +1026,7 @@ impl RoninWindow {
                             );
                         div()
                             .w_full()
+                            .min_w_0()
                             .overflow_hidden()
                             .bg(theme.surface_hover)
                             .rounded_md()
@@ -1227,40 +1038,20 @@ impl RoninWindow {
                             .child(code_lines)
                     }
                     ronin::markdown::MarkdownBlock::List(items) => {
-                        let mut list_div = div().w_full().flex().flex_col().gap_1().pl_4();
+                        let mut list_div =
+                            div().w_full().min_w_0().flex().flex_col().gap_1().pl_4();
                         for item in items {
-                            let mut li_content = div().flex().flex_row().flex_wrap().gap_1();
-                            for inline in item.inlines {
-                                match inline {
-                                    ronin::markdown::Inline::Text(text) => {
-                                        for word in text.split(' ') {
-                                            if !word.is_empty() {
-                                                li_content =
-                                                    li_content.child(div().child(word.to_string()));
-                                            }
-                                        }
-                                    }
-                                    ronin::markdown::Inline::Code(code) => {
-                                        li_content = li_content.child(
-                                            div()
-                                                .bg(theme.surface_muted)
-                                                .rounded_sm()
-                                                .px_1()
-                                                .font_family("Courier New")
-                                                .text_color(theme.accent)
-                                                .child(code),
-                                        );
-                                    }
-                                }
-                            }
+                            let li_content =
+                                ronin::markdown_view::render_inline_flow(&item.inlines, theme);
                             list_div = list_div.child(
                                 div()
                                     .w_full()
+                                    .min_w_0()
                                     .flex()
                                     .flex_row()
                                     .gap_2()
-                                    .child(div().child("•"))
-                                    .child(li_content),
+                                    .child(div().flex_shrink_0().child("•"))
+                                    .child(div().flex_1().min_w_0().child(li_content)),
                             );
                         }
                         list_div
@@ -1393,6 +1184,7 @@ impl RoninWindow {
             Some(
                 div()
                     .w_full()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .mb_4()
@@ -1409,6 +1201,8 @@ impl RoninWindow {
                     .child(
                         div()
                             .w_full()
+                            .min_w_0()
+                            .overflow_hidden()
                             .rounded_lg()
                             .px_4()
                             .py_3()
@@ -1924,6 +1718,7 @@ impl Render for RoninWindow {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .h_full()
                     .flex()
                     .flex_col()
@@ -1933,6 +1728,7 @@ impl Render for RoninWindow {
                             .border_color(theme.border_subtle)
                             .px_6()
                             .py_4()
+                            .truncate()
                             .child(title),
                     )
                     .child(messages)
@@ -1970,42 +1766,5 @@ impl RoninWindow {
             .iter()
             .find(|t| Some(t.id.as_str()) == state.selected_thread_id.as_deref())
             .map(|t| t.title.as_str())
-    }
-}
-
-#[derive(Clone, Copy)]
-struct M0Theme {
-    app_background: gpui::Hsla,
-    sidebar_background: gpui::Hsla,
-    surface_muted: gpui::Hsla,
-    surface_hover: gpui::Hsla,
-    surface_selected: gpui::Hsla,
-    composer_background: gpui::Hsla,
-    border_subtle: gpui::Hsla,
-    border_strong: gpui::Hsla,
-    text_primary: gpui::Hsla,
-    text_muted: gpui::Hsla,
-    accent: gpui::Hsla,
-    accent_hover: gpui::Hsla,
-    accent_text: gpui::Hsla,
-}
-
-impl M0Theme {
-    fn dark() -> Self {
-        Self {
-            app_background: rgb(0x1e1e2e).into(),
-            sidebar_background: rgb(0x181825).into(),
-            surface_muted: rgb(0x313244).into(),
-            surface_hover: rgb(0x45475a).into(),
-            surface_selected: rgb(0x585b70).into(),
-            composer_background: rgb(0x11111b).into(),
-            border_subtle: rgb(0x313244).into(),
-            border_strong: rgb(0x45475a).into(),
-            text_primary: rgb(0xcdd6f4).into(),
-            text_muted: rgb(0xa6adc8).into(),
-            accent: rgb(0xcba6f7).into(),
-            accent_hover: rgb(0xb4befe).into(),
-            accent_text: rgb(0x11111b).into(),
-        }
     }
 }

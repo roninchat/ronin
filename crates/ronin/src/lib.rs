@@ -5,8 +5,17 @@
 /// Markdown parsing and AST for GPUI rendering.
 pub mod markdown;
 
+/// Markdown AST rendering helpers for the GPUI shell.
+pub mod markdown_view;
+
 /// Composer text editor state and input handling.
 pub mod composer;
+
+/// Composer completion logic for context commands, memories, and file paths.
+pub mod completions;
+
+/// M0 color theme for the native shell.
+pub mod theme;
 
 use std::path::PathBuf;
 
