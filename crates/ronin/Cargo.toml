@@ -6,9 +6,18 @@ license.workspace = true
 
 [dependencies]
 arboard.workspace = true
+# Match gpui's ashpd feature set (async-std). Enabling default tokio conflicts with gpui.
+ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
+async-std = "1.13"
 gpui = "0.2.2"
+image = { version = "0.25", default-features = false, features = ["png"] }
 pulldown-cmark = "0.13.4"
 ronin_app = { path = "../ronin_app" }
 ronin_core = { path = "../ronin_core" }
+syntect = "5.2"
 thiserror.workspace = true
 tracing.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -2,22 +2,39 @@
 
 //! SQLite persistence for Ronin.
 
+mod logging;
+
+pub use logging::{
+    default_log_dir, redact_log_text, FileLogOptions, RotatingLogWriter, DEFAULT_MAX_LOG_FILE_BYTES,
+    REDACTED_PLACEHOLDER,
+};
+
 use std::path::{Path, PathBuf};
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 
 use rusqlite::{params, Connection};
 use time::OffsetDateTime;
 use tracing::{debug, info};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use uuid::Uuid;
 
 static TRACING_INIT: Once = Once::new();
+static FILE_LOG_WRITER: Mutex<Option<Arc<RotatingLogWriter>>> = Mutex::new(None);
 
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_initial.sql")),
     (
         2,
         include_str!("../migrations/0002_artifacts_memories_attachments.sql"),
+    ),
+    (3, include_str!("../migrations/0003_message_branches.sql")),
+    (
+        4,
+        include_str!("../migrations/0004_memory_enabled_profile.sql"),
+    ),
+    (
+        5,
+        include_str!("../migrations/0005_artifact_snippet_language.sql"),
     ),
 ];
 
@@ -158,6 +175,9 @@ pub enum RoninDbError {
     /// An artifact could not be deleted.
     #[error("failed to delete artifact")]
     DeleteArtifact(#[source] rusqlite::Error),
+    /// An artifact could not be updated.
+    #[error("failed to update artifact")]
+    UpdateArtifact(#[source] rusqlite::Error),
 
     /// A memory operation failed during creation.
     #[error("failed to create memory")]
@@ -207,6 +227,8 @@ pub struct DbMessage {
     pub status: String,
     /// Sanitized failure reason when status is `error`.
     pub error_message: Option<String>,
+    /// Parent message in the conversation tree (`None` for roots).
+    pub parent_id: Option<String>,
 }
 
 /// Persisted thread row returned by `ronin_db`.
@@ -226,6 +248,8 @@ pub struct DbThread {
     pub provider: Option<String>,
     /// Model name for this thread (e.g. `"llama3.2"`).
     pub model: Option<String>,
+    /// Tip of the currently viewed conversation branch, if set.
+    pub active_leaf_id: Option<String>,
 }
 
 /// Persisted artifact row returned by `ronin_db`.
@@ -241,6 +265,10 @@ pub struct DbArtifact {
     pub title: String,
     /// Artifact content.
     pub content: String,
+    /// Artifact kind (`document` or `snippet`).
+    pub kind: String,
+    /// Optional language id for `snippet` artifacts (from a Markdown fence).
+    pub language: Option<String>,
     /// Creation timestamp as UTC Unix milliseconds.
     pub created_at: i64,
 }
@@ -258,6 +286,10 @@ pub struct DbMemory {
     pub created_at: i64,
     /// Last update timestamp as UTC Unix milliseconds.
     pub updated_at: i64,
+    /// Whether the memory may be included in provider context (`1` = enabled).
+    pub enabled: bool,
+    /// Whether the memory belongs to the always-on user profile group.
+    pub is_profile: bool,
 }
 
 /// Persisted attachment row returned by `ronin_db`.
@@ -325,6 +357,7 @@ impl RoninDb {
             archived: false,
             provider: provider.map(String::from),
             model: model.map(String::from),
+            active_leaf_id: None,
         };
 
         self.conn
@@ -395,7 +428,7 @@ impl RoninDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, title, created_at, updated_at, archived, provider, model FROM threads ORDER BY created_at ASC, id ASC",
+                "SELECT id, title, created_at, updated_at, archived, provider, model, active_leaf_id FROM threads ORDER BY created_at ASC, id ASC",
             )
             .map_err(RoninDbError::PrepareThreadList)?;
 
@@ -409,6 +442,7 @@ impl RoninDb {
                     archived: row.get::<_, i64>(4)? != 0,
                     provider: row.get(5)?,
                     model: row.get(6)?,
+                    active_leaf_id: row.get(7)?,
                 })
             })
             .map_err(RoninDbError::QueryThreads)?
@@ -416,6 +450,21 @@ impl RoninDb {
             .map_err(RoninDbError::ReadThreads)?;
 
         Ok(threads)
+    }
+
+    /// Sets the active conversation leaf for a thread.
+    pub fn set_thread_active_leaf(&self, thread_id: &str, leaf_id: Option<&str>) -> Result<()> {
+        let now = unix_timestamp_millis();
+        self.conn
+            .execute(
+                "UPDATE threads SET active_leaf_id = ?1, updated_at = ?2 WHERE id = ?3",
+                params![leaf_id, now, thread_id],
+            )
+            .map_err(|source| RoninDbError::UpdateThread {
+                id: thread_id.to_string(),
+                source,
+            })?;
+        Ok(())
     }
 
     /// Creates and persists a new message in the given thread.
@@ -426,6 +475,18 @@ impl RoninDb {
         content: &str,
         status: &str,
     ) -> Result<DbMessage> {
+        self.create_message_with_parent(thread_id, role, content, status, None)
+    }
+
+    /// Creates a message with an explicit parent link for branching.
+    pub fn create_message_with_parent(
+        &self,
+        thread_id: &str,
+        role: &str,
+        content: &str,
+        status: &str,
+        parent_id: Option<&str>,
+    ) -> Result<DbMessage> {
         let now = unix_timestamp_millis();
         let message = DbMessage {
             id: Uuid::now_v7().to_string(),
@@ -435,11 +496,12 @@ impl RoninDb {
             created_at: now,
             status: status.to_string(),
             error_message: None,
+            parent_id: parent_id.map(str::to_string),
         };
 
         self.conn
             .execute(
-                "INSERT INTO messages (id, thread_id, role, content, created_at, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO messages (id, thread_id, role, content, created_at, status, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     message.id,
                     message.thread_id,
@@ -447,6 +509,7 @@ impl RoninDb {
                     message.content,
                     message.created_at,
                     message.status,
+                    message.parent_id,
                 ],
             )
             .map_err(RoninDbError::CreateMessage)?;
@@ -459,7 +522,7 @@ impl RoninDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, thread_id, role, content, created_at, status, error_message FROM messages WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
+                "SELECT id, thread_id, role, content, created_at, status, error_message, parent_id FROM messages WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
             )
             .map_err(RoninDbError::PrepareMessageList)?;
 
@@ -473,6 +536,7 @@ impl RoninDb {
                     created_at: row.get(4)?,
                     status: row.get(5)?,
                     error_message: row.get(6)?,
+                    parent_id: row.get(7)?,
                 })
             })
             .map_err(RoninDbError::QueryMessages)?
@@ -551,7 +615,7 @@ impl RoninDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, thread_id, role, content, created_at, status, error_message FROM messages WHERE status = 'streaming' ORDER BY created_at ASC, id ASC",
+                "SELECT id, thread_id, role, content, created_at, status, error_message, parent_id FROM messages WHERE status = 'streaming' ORDER BY created_at ASC, id ASC",
             )
             .map_err(RoninDbError::PrepareMessageList)?;
 
@@ -565,6 +629,7 @@ impl RoninDb {
                     created_at: row.get(4)?,
                     status: row.get(5)?,
                     error_message: row.get(6)?,
+                    parent_id: row.get(7)?,
                 })
             })
             .map_err(RoninDbError::QueryMessages)?
@@ -574,13 +639,50 @@ impl RoninDb {
         Ok(messages)
     }
 
-    /// Creates and persists a new artifact.
+    /// Creates and persists a new document artifact.
     pub fn create_artifact(
         &self,
         thread_id: &str,
         message_id: &str,
         title: &str,
         content: &str,
+    ) -> Result<DbArtifact> {
+        self.create_artifact_with_kind(thread_id, message_id, title, content, "document", None)
+    }
+
+    /// Creates and persists a code-snippet artifact with fence language metadata.
+    pub fn create_snippet_artifact(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        title: &str,
+        content: &str,
+        language: &str,
+    ) -> Result<DbArtifact> {
+        let language = language.trim();
+        let language = if language.is_empty() {
+            None
+        } else {
+            Some(language.to_string())
+        };
+        self.create_artifact_with_kind(
+            thread_id,
+            message_id,
+            title,
+            content,
+            "snippet",
+            language.as_deref(),
+        )
+    }
+
+    fn create_artifact_with_kind(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        title: &str,
+        content: &str,
+        kind: &str,
+        language: Option<&str>,
     ) -> Result<DbArtifact> {
         let now = unix_timestamp_millis();
         let artifact = DbArtifact {
@@ -589,18 +691,22 @@ impl RoninDb {
             message_id: message_id.to_string(),
             title: title.to_string(),
             content: content.to_string(),
+            kind: kind.to_string(),
+            language: language.map(str::to_string),
             created_at: now,
         };
 
         self.conn
             .execute(
-                "INSERT INTO artifacts (id, thread_id, message_id, title, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO artifacts (id, thread_id, message_id, title, content, kind, language, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     artifact.id,
                     artifact.thread_id,
                     artifact.message_id,
                     artifact.title,
                     artifact.content,
+                    artifact.kind,
+                    artifact.language,
                     artifact.created_at,
                 ],
             )
@@ -613,20 +719,15 @@ impl RoninDb {
     pub fn get_artifact(&self, id: &str) -> Result<Option<DbArtifact>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, thread_id, message_id, title, content, created_at FROM artifacts WHERE id = ?1")
+            .prepare("SELECT id, thread_id, message_id, title, content, kind, language, created_at FROM artifacts WHERE id = ?1")
             .map_err(RoninDbError::GetArtifact)?;
 
         let mut rows = stmt.query(params![id]).map_err(RoninDbError::GetArtifact)?;
 
         if let Some(row) = rows.next().map_err(RoninDbError::GetArtifact)? {
-            Ok(Some(DbArtifact {
-                id: row.get(0).map_err(RoninDbError::GetArtifact)?,
-                thread_id: row.get(1).map_err(RoninDbError::GetArtifact)?,
-                message_id: row.get(2).map_err(RoninDbError::GetArtifact)?,
-                title: row.get(3).map_err(RoninDbError::GetArtifact)?,
-                content: row.get(4).map_err(RoninDbError::GetArtifact)?,
-                created_at: row.get(5).map_err(RoninDbError::GetArtifact)?,
-            }))
+            Ok(Some(
+                row_to_artifact(&row).map_err(RoninDbError::GetArtifact)?,
+            ))
         } else {
             Ok(None)
         }
@@ -636,20 +737,11 @@ impl RoninDb {
     pub fn list_artifacts_for_thread(&self, thread_id: &str) -> Result<Vec<DbArtifact>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, thread_id, message_id, title, content, created_at FROM artifacts WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC")
+            .prepare("SELECT id, thread_id, message_id, title, content, kind, language, created_at FROM artifacts WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC")
             .map_err(RoninDbError::ListArtifacts)?;
 
         let artifacts = stmt
-            .query_map(params![thread_id], |row| {
-                Ok(DbArtifact {
-                    id: row.get(0)?,
-                    thread_id: row.get(1)?,
-                    message_id: row.get(2)?,
-                    title: row.get(3)?,
-                    content: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            })
+            .query_map(params![thread_id], |row| row_to_artifact(row))
             .map_err(RoninDbError::ListArtifacts)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(RoninDbError::ListArtifacts)?;
@@ -661,20 +753,11 @@ impl RoninDb {
     pub fn list_all_artifacts(&self) -> Result<Vec<DbArtifact>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, thread_id, message_id, title, content, created_at FROM artifacts ORDER BY created_at DESC, id DESC")
+            .prepare("SELECT id, thread_id, message_id, title, content, kind, language, created_at FROM artifacts ORDER BY created_at DESC, id DESC")
             .map_err(RoninDbError::ListArtifacts)?;
 
         let artifacts = stmt
-            .query_map([], |row| {
-                Ok(DbArtifact {
-                    id: row.get(0)?,
-                    thread_id: row.get(1)?,
-                    message_id: row.get(2)?,
-                    title: row.get(3)?,
-                    content: row.get(4)?,
-                    created_at: row.get(5)?,
-                })
-            })
+            .query_map([], |row| row_to_artifact(row))
             .map_err(RoninDbError::ListArtifacts)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(RoninDbError::ListArtifacts)?;
@@ -690,8 +773,30 @@ impl RoninDb {
         Ok(())
     }
 
+    /// Updates an artifact's title and content.
+    pub fn update_artifact(&self, id: &str, title: &str, content: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE artifacts SET title = ?2, content = ?3 WHERE id = ?1",
+                params![id, title, content],
+            )
+            .map_err(RoninDbError::UpdateArtifact)?;
+        Ok(())
+    }
+
     /// Creates and persists a new memory.
     pub fn create_memory(&self, title: &str, content: &str) -> Result<DbMemory> {
+        self.create_memory_with_flags(title, content, true, false)
+    }
+
+    /// Creates a memory with explicit enable and profile flags.
+    pub fn create_memory_with_flags(
+        &self,
+        title: &str,
+        content: &str,
+        enabled: bool,
+        is_profile: bool,
+    ) -> Result<DbMemory> {
         let now = unix_timestamp_millis();
         let memory = DbMemory {
             id: Uuid::now_v7().to_string(),
@@ -699,17 +804,21 @@ impl RoninDb {
             content: content.to_string(),
             created_at: now,
             updated_at: now,
+            enabled,
+            is_profile,
         };
 
         self.conn
             .execute(
-                "INSERT INTO memories (id, title, content, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO memories (id, title, content, created_at, updated_at, enabled, is_profile) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     memory.id,
                     memory.title,
                     memory.content,
                     memory.created_at,
                     memory.updated_at,
+                    memory.enabled as i64,
+                    memory.is_profile as i64,
                 ],
             )
             .map_err(RoninDbError::CreateMemory)?;
@@ -722,20 +831,16 @@ impl RoninDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, title, content, created_at, updated_at FROM memories WHERE id = ?1",
+                "SELECT id, title, content, created_at, updated_at, enabled, is_profile FROM memories WHERE id = ?1",
             )
             .map_err(RoninDbError::GetMemory)?;
 
         let mut rows = stmt.query(params![id]).map_err(RoninDbError::GetMemory)?;
 
         if let Some(row) = rows.next().map_err(RoninDbError::GetMemory)? {
-            Ok(Some(DbMemory {
-                id: row.get(0).map_err(RoninDbError::GetMemory)?,
-                title: row.get(1).map_err(RoninDbError::GetMemory)?,
-                content: row.get(2).map_err(RoninDbError::GetMemory)?,
-                created_at: row.get(3).map_err(RoninDbError::GetMemory)?,
-                updated_at: row.get(4).map_err(RoninDbError::GetMemory)?,
-            }))
+            Ok(Some(
+                map_memory_row(&row).map_err(RoninDbError::GetMemory)?,
+            ))
         } else {
             Ok(None)
         }
@@ -745,19 +850,11 @@ impl RoninDb {
     pub fn list_all_memories(&self) -> Result<Vec<DbMemory>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, title, content, created_at, updated_at FROM memories ORDER BY created_at ASC, id ASC")
+            .prepare("SELECT id, title, content, created_at, updated_at, enabled, is_profile FROM memories ORDER BY created_at ASC, id ASC")
             .map_err(RoninDbError::ListMemories)?;
 
         let memories = stmt
-            .query_map([], |row| {
-                Ok(DbMemory {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    content: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
-                })
-            })
+            .query_map([], |row| map_memory_row(row))
             .map_err(RoninDbError::ListMemories)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(RoninDbError::ListMemories)?;
@@ -772,6 +869,30 @@ impl RoninDb {
             .execute(
                 "UPDATE memories SET title = ?2, content = ?3, updated_at = ?4 WHERE id = ?1",
                 params![id, title, content, now],
+            )
+            .map_err(RoninDbError::UpdateMemory)?;
+        Ok(())
+    }
+
+    /// Sets whether a memory is enabled for provider context.
+    pub fn set_memory_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        let now = unix_timestamp_millis();
+        self.conn
+            .execute(
+                "UPDATE memories SET enabled = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, enabled as i64, now],
+            )
+            .map_err(RoninDbError::UpdateMemory)?;
+        Ok(())
+    }
+
+    /// Sets whether a memory belongs to the user profile group.
+    pub fn set_memory_profile(&self, id: &str, is_profile: bool) -> Result<()> {
+        let now = unix_timestamp_millis();
+        self.conn
+            .execute(
+                "UPDATE memories SET is_profile = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, is_profile as i64, now],
             )
             .map_err(RoninDbError::UpdateMemory)?;
         Ok(())
@@ -944,17 +1065,132 @@ impl RoninDb {
     }
 }
 
+fn map_memory_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DbMemory> {
+    Ok(DbMemory {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        content: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+        enabled: row.get::<_, i64>(5)? != 0,
+        is_profile: row.get::<_, i64>(6)? != 0,
+    })
+}
+
+fn row_to_artifact(row: &rusqlite::Row<'_>) -> rusqlite::Result<DbArtifact> {
+    Ok(DbArtifact {
+        id: row.get(0)?,
+        thread_id: row.get(1)?,
+        message_id: row.get(2)?,
+        title: row.get(3)?,
+        content: row.get(4)?,
+        kind: row.get(5)?,
+        language: row.get(6)?,
+        created_at: row.get(7)?,
+    })
+}
+
 fn unix_timestamp_millis() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000
 }
 
 /// Initializes Ronin's stderr tracing subscriber once per process.
 pub fn init_tracing() {
+    init_tracing_with(FileLogOptions::default());
+}
+
+/// Initializes tracing to stderr and, when enabled, a rotating redacted log file.
+pub fn init_tracing_with(options: FileLogOptions) {
     TRACING_INIT.call_once(|| {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(std::io::stderr)
+
+        let stderr_layer = fmt::layer()
+            .with_ansi(true)
+            .with_writer(RedactingStderr);
+
+        if options.enabled {
+            match RotatingLogWriter::open(&options.log_dir, options.max_file_bytes) {
+                Ok(writer) => {
+                    let writer = Arc::new(writer);
+                    if let Ok(mut slot) = FILE_LOG_WRITER.lock() {
+                        *slot = Some(Arc::clone(&writer));
+                    }
+                    let file_layer = fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(RedactingMakeWriter(Arc::clone(&writer)));
+                    let _ = tracing_subscriber::registry()
+                        .with(filter)
+                        .with(stderr_layer)
+                        .with(file_layer)
+                        .try_init();
+                    info!(
+                        log_dir = %options.log_dir.display(),
+                        "ronin persistent file logging enabled"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("ronin: failed to open log file: {e}");
+                }
+            }
+        }
+
+        let _ = tracing_subscriber::registry()
+            .with(filter)
+            .with(stderr_layer)
             .try_init();
     });
+}
+
+/// MakeWriter that redacts through [`RotatingLogWriter`].
+#[derive(Clone)]
+struct RedactingMakeWriter(Arc<RotatingLogWriter>);
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RedactingMakeWriter {
+    type Writer = RedactingWriterGuard;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        RedactingWriterGuard(Arc::clone(&self.0))
+    }
+}
+
+struct RedactingWriterGuard(Arc<RotatingLogWriter>);
+
+impl std::io::Write for RedactingWriterGuard {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let text = String::from_utf8_lossy(buf);
+        let redacted = redact_log_text(&text);
+        self.0.write_all(redacted.as_bytes())?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush_writer()
+    }
+}
+
+/// Stderr writer that applies [`redact_log_text`] before emitting.
+struct RedactingStderr;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RedactingStderr {
+    type Writer = RedactingStderrGuard;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        RedactingStderrGuard
+    }
+}
+
+struct RedactingStderrGuard;
+
+impl std::io::Write for RedactingStderrGuard {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let text = String::from_utf8_lossy(buf);
+        let redacted = redact_log_text(&text);
+        std::io::Write::write_all(&mut std::io::stderr(), redacted.as_bytes())?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::stderr().flush()
+    }
 }

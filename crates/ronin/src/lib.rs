@@ -8,14 +8,79 @@ pub mod markdown;
 /// Markdown AST rendering helpers for the GPUI shell.
 pub mod markdown_view;
 
-/// Composer text editor state and input handling.
-pub mod composer;
-
 /// Composer completion logic for context commands, memories, and file paths.
 pub mod completions;
 
-/// M0 color theme for the native shell.
+/// Filterable `@` attachment and `/` action picker presentation.
+pub mod composer_pickers;
+
+/// Drag-and-drop path ingest and clipboard image paste → attachments.
+pub mod composer_ingest;
+
+/// Composer context/token size estimation and indicator presentation.
+pub mod context_indicator;
+
+/// Folder attach: bounded listing and file selection.
+pub mod folder_attach;
+
+/// Attachment size warnings before send.
+pub mod attachment_size;
+
+/// Presentation model for the dedicated Artifacts panel.
+pub mod artifacts_panel;
+
+/// Attachment preview models for composer and sent messages.
+pub mod attachment_preview;
+
+/// Wayland portal screenshot capture with CLI fallbacks.
+pub mod screenshot_capture;
+
+/// Syntax highlighting for fenced Markdown code blocks.
+pub mod syntax_highlight;
+
+/// Composer text editor state and input handling.
+pub mod composer;
+
+/// Color themes and semantic UI tokens for the native shell.
 pub mod theme;
+
+/// Elevation, empty/error presentations, and streaming motion tokens.
+pub mod visual_polish;
+
+/// Keyboard-first navigation state machine and shortcut catalog.
+pub mod keyboard_nav;
+
+/// Inline thread rename presentation and title-generation status copy.
+pub mod thread_titles;
+
+/// Post-send message edit drafts and branch navigation labels.
+pub mod message_branches;
+
+/// Global search across threads, artifacts, and memories.
+pub mod global_search;
+
+/// Memory management: enable/disable, profile group, context indicator.
+pub mod memory_management;
+
+/// Model picker: provider grouping, capabilities, keyboard navigation.
+pub mod model_picker;
+
+/// Provider settings: Test Connection action and result presentation.
+pub mod provider_settings;
+
+/// Quick mode compact overlay state and action labels.
+pub mod quick_mode;
+
+/// Single-instance lock and Unix-socket IPC for CLI intent routing.
+pub mod instance;
+
+/// Linux packaging: .desktop validation, install path planning, icon inventory.
+pub mod packaging;
+
+pub use instance::{
+    acquire_instance, instance_runtime_dir, plan_incoming_launch, AppliedIntent, IncomingLaunch,
+    InstanceAcquire, InstanceError, InstancePrimary,
+};
 
 use std::path::PathBuf;
 
@@ -39,6 +104,11 @@ pub enum LaunchIntent {
         /// File paths to attach when the app opens.
         attach_paths: Vec<PathBuf>,
     },
+    /// Quick-launch mode: open the compact overlay for a one-shot question.
+    Quick {
+        /// File paths to attach when the app opens.
+        attach_paths: Vec<PathBuf>,
+    },
 }
 
 /// Errors returned by Ronin launcher setup.
@@ -49,7 +119,7 @@ pub enum LauncherError {
     MissingHome,
 
     /// CLI argument is not supported by the launcher.
-    #[error("unsupported launch flag '{flag}'. supported flags: --new, --provider ollama, --attach <path>")]
+    #[error("unsupported launch flag '{flag}'. supported flags: --new, --quick, --provider ollama, --attach <path>")]
     UnsupportedFlag {
         /// Unsupported flag supplied by the user.
         flag: String,
@@ -65,6 +135,7 @@ pub fn parse_launch_intent(
         Persisted,
         NewThread,
         Ollama,
+        Quick,
     }
 
     let mut mode = LaunchMode::Persisted;
@@ -74,6 +145,7 @@ pub fn parse_launch_intent(
         let arg = arg.as_ref();
         match arg {
             "--new" => mode = LaunchMode::NewThread,
+            "--quick" => mode = LaunchMode::Quick,
             "--attach" => match args.next().as_ref().map(AsRef::as_ref) {
                 Some(path) => attach_paths.push(PathBuf::from(path)),
                 None => {
@@ -107,6 +179,7 @@ pub fn parse_launch_intent(
         LaunchMode::Persisted => LaunchIntent::OpenPersisted { attach_paths },
         LaunchMode::NewThread => LaunchIntent::NewThread { attach_paths },
         LaunchMode::Ollama => LaunchIntent::OpenWithOllama { attach_paths },
+        LaunchMode::Quick => LaunchIntent::Quick { attach_paths },
     };
 
     tracing::info!(intent = ?intent, "ronin launch intent parsed");

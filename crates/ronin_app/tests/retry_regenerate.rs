@@ -130,7 +130,7 @@ fn regenerate_last_assistant_should_cancel_and_stream_new_response() {
     while shell.poll_streaming() {}
 
     let msgs = shell.state().messages.as_ref().unwrap();
-    // 1 user, 1 new complete assistant (old assistant is deleted)
+    // Active path: 1 user + new assistant; original assistant kept as sibling.
     assert_eq!(msgs.len(), 2);
 
     assert_eq!(msgs[0].role, MessageRole::User);
@@ -140,4 +140,10 @@ fn regenerate_last_assistant_should_cancel_and_stream_new_response() {
     assert_eq!(msgs[1].content, "New response");
     assert_eq!(msgs[1].status, MessageStatus::Complete);
     assert_ne!(msgs[1].id, first_assistant_id);
+
+    let siblings = shell
+        .branch_siblings(&thread_id, &msgs[1].id)
+        .expect("siblings");
+    assert_eq!(siblings.len(), 2);
+    assert!(siblings.iter().any(|m| m.id == first_assistant_id));
 }

@@ -25,6 +25,8 @@ pub fn command_completion(text: &str, cursor: usize) -> Option<CommandCompletion
     [
         ("@file:", "Attach file"),
         ("@memory:", "Attach memory"),
+        ("@artifact:", "Attach artifact"),
+        ("@screenshot", "Capture screenshot"),
         ("@clipboard", "Attach clipboard"),
     ]
     .iter()
@@ -52,6 +54,26 @@ pub fn filter_memory_completions(
         .collect();
     matches.truncate(8);
     matches
+}
+
+/// Extracts the `@artifact:` prefix at the cursor, if the token is an artifact ref.
+pub fn artifact_completion_prefix(text: &str, cursor: usize) -> Option<&str> {
+    let (_, token) = token_before_cursor(text, cursor);
+    token.strip_prefix("@artifact:")
+}
+
+/// Filters `(id, title)` artifact candidates (panel list) against a typed prefix.
+pub fn filter_artifact_completions(
+    prefix: &str,
+    artifacts: impl IntoIterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    filter_memory_completions(prefix, artifacts)
+}
+
+/// Returns true when the token at `cursor` is an `@file:` path completion.
+pub fn file_path_completion_active(text: &str, cursor: usize) -> bool {
+    let (_, token) = token_before_cursor(text, cursor);
+    token.starts_with("@file:")
 }
 
 /// Suggests directory entries for the `@file:` path token at the cursor.
@@ -231,6 +253,60 @@ mod tests {
         let matches = filter_memory_completions("coffee", memories);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].0, "abc123");
+    }
+
+    #[test]
+    fn command_completion_should_suggest_artifact_command() {
+        let text = "see @art";
+        let result = command_completion(text, text.len());
+        assert_eq!(
+            result,
+            Some((
+                "@artifact:".to_string(),
+                "Attach artifact".to_string(),
+                4,
+                8
+            ))
+        );
+    }
+
+    #[test]
+    fn command_completion_should_suggest_screenshot_command() {
+        let text = "look @screen";
+        let result = command_completion(text, text.len());
+        assert_eq!(
+            result,
+            Some((
+                "@screenshot".to_string(),
+                "Capture screenshot".to_string(),
+                5,
+                12
+            ))
+        );
+    }
+
+    #[test]
+    fn artifact_completion_prefix_should_extract_typed_prefix() {
+        let text = "use @artifact:ref";
+        assert_eq!(
+            artifact_completion_prefix(text, text.len()),
+            Some("ref")
+        );
+    }
+
+    #[test]
+    fn filter_artifact_completions_should_match_panel_list_by_id_or_title() {
+        let artifacts = vec![
+            ("art-aaa".to_string(), "API client".to_string()),
+            ("art-bbb".to_string(), "UI mock".to_string()),
+        ];
+        let by_title = filter_artifact_completions("api", artifacts.clone());
+        assert_eq!(by_title.len(), 1);
+        assert_eq!(by_title[0].0, "art-aaa");
+
+        let by_id = filter_artifact_completions("art-b", artifacts);
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0].0, "art-bbb");
     }
 
     #[test]

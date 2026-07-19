@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Ronin
+GenericName=AI Workbench
+Comment=Native intelligence for Linux — local-first AI workbench
+Exec=ronin
+Icon=ronin
+Terminal=false
+Categories=Utility;Development;Office;
+Keywords=AI;chat;LLM;ollama;assistant;
+StartupNotify=true

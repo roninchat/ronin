@@ -26,4 +26,8 @@ pub enum RoninAppError {
     /// Action cannot be performed on the target message.
     #[error("invalid message for action")]
     InvalidMessage,
+
+    /// Thread title is empty or whitespace-only.
+    #[error("thread title must not be empty")]
+    InvalidThreadTitle,
 }

@@ -6,9 +6,10 @@
 //! the window.
 
 use gpui::prelude::*;
-use gpui::{div, Div};
+use gpui::{div, rgb, Div};
 
 use crate::markdown::Inline;
+use crate::syntax_highlight::{highlight_code, HighlightedLine};
 use crate::theme::M0Theme;
 
 /// Maximum characters a single word segment may occupy before it is split.
@@ -77,6 +78,43 @@ pub fn render_inline_flow(inlines: &[Inline], theme: &M0Theme) -> Div {
         }
     }
     flow
+}
+
+/// Renders fenced code body lines with theme-aware syntax highlighting.
+///
+/// Uses [`highlight_code`] so streaming re-renders stay safe: unknown languages
+/// and missing language tags fall back to plain monospaced text.
+pub fn render_highlighted_code_lines(
+    language: Option<&str>,
+    content: &str,
+    theme: &M0Theme,
+) -> Div {
+    let lines = highlight_code(language, content, theme.color_scheme);
+    render_highlighted_lines(&lines)
+}
+
+fn render_highlighted_lines(lines: &[HighlightedLine]) -> Div {
+    let mut code_lines = div()
+        .w_full()
+        .font_family("Courier New")
+        .flex()
+        .flex_col();
+    for line in lines {
+        let mut row = div().flex().flex_row().flex_wrap();
+        if line.spans.is_empty()
+            || (line.spans.len() == 1 && line.spans[0].text.is_empty())
+        {
+            row = row.child(div().child(" "));
+        } else {
+            for span in &line.spans {
+                let (r, g, b) = span.rgb;
+                let color = rgb(((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
+                row = row.child(div().text_color(color).child(span.text.clone()));
+            }
+        }
+        code_lines = code_lines.child(row);
+    }
+    code_lines
 }
 
 #[cfg(test)]
