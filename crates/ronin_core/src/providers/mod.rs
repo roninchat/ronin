@@ -97,3 +97,27 @@ System: "[TOOL_RESULT: list_memories, result: "ID, Title\n019ecc48, Food Prefere
 You: "Let me fetch your food preferences. [TOOL_CALL: get_memory, id: "019ecc48"]"
 System: "[TOOL_RESULT: get_memory, result: "Prefers tea over coffee"]"
 You: "No, according to your preferences, you prefer tea over coffee.""#;
+
+/// Resolves the system prompt that will be sent to the model.
+///
+/// - [`PersonaMode::Append`]: built-in Ronin prompt, then optional custom text.
+/// - [`PersonaMode::Replace`]: custom text only; empty/whitespace falls back to built-in.
+pub fn effective_system_prompt(persona: &crate::config::PersonaConfig) -> String {
+    let custom = persona.text.trim();
+    match persona.mode {
+        crate::config::PersonaMode::Append => {
+            if custom.is_empty() {
+                RONIN_SYSTEM_PROMPT.to_string()
+            } else {
+                format!("{RONIN_SYSTEM_PROMPT}\n\n{custom}")
+            }
+        }
+        crate::config::PersonaMode::Replace => {
+            if custom.is_empty() {
+                RONIN_SYSTEM_PROMPT.to_string()
+            } else {
+                custom.to_string()
+            }
+        }
+    }
+}

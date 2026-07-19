@@ -43,7 +43,7 @@ fn parse_launch_intent_should_reject_unsupported_flags() {
 
     assert_eq!(
         error.to_string(),
-        "unsupported launch flag '--unknown'. supported flags: --new, --provider ollama, --attach <path>"
+        "unsupported launch flag '--unknown'. supported flags: --new, --quick, --provider ollama, --attach <path>"
     );
 }
 
@@ -56,8 +56,19 @@ fn ronin_should_exit_nonzero_when_unsupported_flag_is_passed() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains(
-        "unsupported launch flag '--unknown'. supported flags: --new, --provider ollama, --attach <path>"
+        "unsupported launch flag '--unknown'. supported flags: --new, --quick, --provider ollama, --attach <path>"
     ));
+}
+
+#[test]
+fn parse_launch_intent_should_accept_quick_flag() {
+    let intent = parse_launch_intent(["--quick"]).expect("parse --quick");
+    assert_eq!(
+        intent,
+        LaunchIntent::Quick {
+            attach_paths: Vec::new(),
+        }
+    );
 }
 
 #[test]

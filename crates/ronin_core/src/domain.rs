@@ -30,6 +30,8 @@ pub struct Thread {
     pub provider: Option<String>,
     /// Selected model name.
     pub model: Option<String>,
+    /// Tip of the currently viewed conversation branch, if set.
+    pub active_leaf_id: Option<String>,
 }
 
 /// Role of a chat message.
@@ -75,6 +77,8 @@ pub struct Message {
     pub status: MessageStatus,
     /// Sanitized failure reason when status is `Error`.
     pub error_message: Option<String>,
+    /// Parent message in the conversation tree (`None` for roots).
+    pub parent_id: Option<String>,
 }
 
 /// Opaque identifier for an Artifact.
@@ -100,6 +104,12 @@ pub enum AttachmentKind {
     Memory,
     /// An artifact attachment.
     Artifact,
+    /// An image file attachment.
+    Image,
+    /// A captured screenshot attachment.
+    Screenshot,
+    /// A folder attachment with user-selected files.
+    Folder,
 }
 
 /// A persisted artifact linked to a specific message.
@@ -115,8 +125,19 @@ pub struct Artifact {
     pub title: String,
     /// Artifact content.
     pub content: String,
+    /// Artifact kind (`document` or `snippet`).
+    pub kind: String,
+    /// Optional language id for `snippet` artifacts (from a Markdown fence).
+    pub language: Option<String>,
     /// Creation timestamp as UTC Unix milliseconds.
     pub created_at: i64,
+}
+
+impl Artifact {
+    /// Whether this artifact is a code snippet.
+    pub fn is_snippet(&self) -> bool {
+        self.kind == "snippet"
+    }
 }
 
 /// A persisted core memory piece.
@@ -132,6 +153,10 @@ pub struct Memory {
     pub created_at: i64,
     /// Last update timestamp as UTC Unix milliseconds.
     pub updated_at: i64,
+    /// Whether the memory may be included in provider context.
+    pub enabled: bool,
+    /// Whether the memory belongs to the always-on user profile group.
+    pub is_profile: bool,
 }
 
 /// A persisted attachment linked to a specific message.
@@ -165,6 +190,7 @@ impl From<DbThread> for Thread {
             archived: thread.archived,
             provider: thread.provider,
             model: thread.model,
+            active_leaf_id: thread.active_leaf_id,
         }
     }
 }
@@ -189,6 +215,7 @@ impl From<DbMessage> for Message {
                 _ => MessageStatus::Complete,
             },
             error_message: msg.error_message,
+            parent_id: msg.parent_id,
         }
     }
 }
@@ -201,6 +228,8 @@ impl From<DbArtifact> for Artifact {
             message_id: artifact.message_id,
             title: artifact.title,
             content: artifact.content,
+            kind: artifact.kind,
+            language: artifact.language,
             created_at: artifact.created_at,
         }
     }
@@ -214,6 +243,8 @@ impl From<DbMemory> for Memory {
             content: memory.content,
             created_at: memory.created_at,
             updated_at: memory.updated_at,
+            enabled: memory.enabled,
+            is_profile: memory.is_profile,
         }
     }
 }
@@ -226,6 +257,10 @@ impl From<DbAttachment> for Attachment {
             kind: match attachment.kind.as_str() {
                 "clipboard" => AttachmentKind::Clipboard,
                 "memory" => AttachmentKind::Memory,
+                "artifact" => AttachmentKind::Artifact,
+                "image" => AttachmentKind::Image,
+                "screenshot" => AttachmentKind::Screenshot,
+                "folder" => AttachmentKind::Folder,
                 _ => AttachmentKind::File,
             },
             name: attachment.name,

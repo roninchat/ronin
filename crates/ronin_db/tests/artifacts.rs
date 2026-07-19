@@ -48,6 +48,31 @@ fn artifact_crud_round_trip() {
 }
 
 #[test]
+fn update_artifact_should_persist_new_title_and_content() {
+    let (db, _temp) = open_test_db();
+    let thread = db.create_thread().expect("create thread");
+    let msg = db
+        .create_message(&thread.id, "user", "create artifact", "complete")
+        .expect("create message");
+    let artifact = db
+        .create_artifact(&thread.id, &msg.id, "Original Title", "original content")
+        .expect("create artifact");
+
+    db.update_artifact(&artifact.id, "Renamed Title", "edited content")
+        .expect("update artifact");
+
+    let fetched = db
+        .get_artifact(&artifact.id)
+        .expect("get artifact")
+        .expect("artifact should exist");
+    assert_eq!(fetched.title, "Renamed Title");
+    assert_eq!(fetched.content, "edited content");
+    assert_eq!(fetched.id, artifact.id);
+    assert_eq!(fetched.thread_id, artifact.thread_id);
+    assert_eq!(fetched.message_id, artifact.message_id);
+}
+
+#[test]
 fn list_all_artifacts_should_return_artifacts_across_threads_newest_first() {
     let (db, _temp) = open_test_db();
 
@@ -74,4 +99,49 @@ fn list_all_artifacts_should_return_artifacts_across_threads_newest_first() {
     // newest first (art2 was created after art1)
     assert_eq!(all[0].id, art2.id);
     assert_eq!(all[1].id, art1.id);
+}
+
+#[test]
+fn create_snippet_artifact_should_persist_kind_and_language() {
+    let (db, _temp) = open_test_db();
+    let thread = db.create_thread().expect("create thread");
+    let msg = db
+        .create_message(
+            &thread.id,
+            "assistant",
+            "```rust\nfn main() {}\n```",
+            "complete",
+        )
+        .expect("create message");
+
+    let artifact = db
+        .create_snippet_artifact(&thread.id, &msg.id, "main.rs", "fn main() {}", "rust")
+        .expect("create snippet");
+
+    assert_eq!(artifact.kind, "snippet");
+    assert_eq!(artifact.language.as_deref(), Some("rust"));
+    assert_eq!(artifact.content, "fn main() {}");
+
+    let fetched = db
+        .get_artifact(&artifact.id)
+        .expect("get")
+        .expect("exists");
+    assert_eq!(fetched.kind, "snippet");
+    assert_eq!(fetched.language.as_deref(), Some("rust"));
+}
+
+#[test]
+fn create_artifact_should_default_to_document_kind_without_language() {
+    let (db, _temp) = open_test_db();
+    let thread = db.create_thread().expect("create thread");
+    let msg = db
+        .create_message(&thread.id, "user", "create artifact", "complete")
+        .expect("create message");
+
+    let artifact = db
+        .create_artifact(&thread.id, &msg.id, "My Artifact", "some content")
+        .expect("create artifact");
+
+    assert_eq!(artifact.kind, "document");
+    assert_eq!(artifact.language, None);
 }

@@ -349,7 +349,7 @@ fn shell_should_report_openai_error_when_list_models_fails_with_other_error() {
     assert_eq!(
         state.provider_status,
         ProviderStatus::OpenAiError {
-            message: "API Connection timeout".into()
+            message: "Could not reach the OpenAI-compatible endpoint. Check the base URL in provider settings and your network connection.".into()
         }
     );
 }
@@ -397,6 +397,41 @@ default_model = "gpt-4o"
         .expect("resolve 2");
     assert_eq!(p2, "ollama");
     assert_eq!(m2, "llama3");
+}
+
+#[test]
+fn shell_should_store_connection_test_result_on_state() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+
+    struct Offline;
+    impl OllamaProvider for Offline {
+        fn name(&self) -> &'static str {
+            "ollama"
+        }
+        fn check_health(&self) -> OllamaHealth {
+            OllamaHealth::Offline
+        }
+        fn list_models(&self) -> Result<Vec<String>, ronin_core::RoninError> {
+            Err(ronin_core::RoninError::Provider("connection refused".into()))
+        }
+    }
+
+    let mut shell = RoninShell::open(paths).expect("open shell");
+    assert!(shell.state().connection_test.is_none());
+
+    let result = shell.record_connection_test(&Offline);
+    assert!(!result.is_success());
+    let stored = shell
+        .state()
+        .connection_test
+        .as_ref()
+        .expect("connection test stored");
+    assert_eq!(stored, &result);
+    assert!(stored.message().to_lowercase().contains("ollama"));
 }
 
 #[test]
@@ -462,4 +497,36 @@ fn shell_artifact_crud() {
         .expect("delete artifact");
     let after = shell.list_all_artifacts().expect("list after delete");
     assert!(after.is_empty());
+}
+
+#[test]
+fn shell_should_rename_and_edit_artifact_and_list_reflects_change() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+    let shell = RoninShell::open(paths).expect("open shell");
+
+    let thread_id = shell
+        .state()
+        .selected_thread_id
+        .clone()
+        .expect("selected thread");
+    let msg = shell
+        .session()
+        .create_message(&thread_id, MessageRole::User, "hello")
+        .expect("create message");
+    let artifact = shell
+        .create_artifact(&thread_id, &msg.id, "Draft", "v1")
+        .expect("create artifact");
+
+    shell
+        .update_artifact(&artifact.id, "Final Title", "v2 body")
+        .expect("update artifact");
+
+    let listed = shell.list_all_artifacts().expect("list after update");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].title, "Final Title");
+    assert_eq!(listed[0].content, "v2 body");
 }
