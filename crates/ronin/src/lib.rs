@@ -43,6 +43,9 @@ pub use screenshot_capture::{
 /// XDG Desktop Portal notifications for generation done/fail.
 pub mod desktop_notifications;
 
+/// Opt-in clipboard watch host reader (arboard) for confirm-to-attach proposals.
+pub mod clipboard_watch;
+
 /// Syntax highlighting for fenced Markdown code blocks.
 pub mod syntax_highlight;
 

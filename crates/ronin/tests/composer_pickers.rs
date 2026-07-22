@@ -29,6 +29,9 @@ fn slash_catalog_should_list_initial_actions() {
     assert!(kinds.contains(&SlashActionKind::NewThread));
     assert!(kinds.contains(&SlashActionKind::ClearComposer));
     assert!(kinds.contains(&SlashActionKind::SwitchModel));
+    assert!(kinds.contains(&SlashActionKind::ClipboardWatchToggle));
+    assert!(kinds.contains(&SlashActionKind::ClipboardWatchConfirm));
+    assert!(kinds.contains(&SlashActionKind::ClipboardWatchDismiss));
 }
 
 #[test]

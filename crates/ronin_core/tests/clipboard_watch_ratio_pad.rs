@@ -1,0 +1,188 @@
+//! Ratio pad: slash-equivalent watch lifecycle (#77).
+
+use ronin_core::{ClipboardObserveOutcome, ClipboardWatchController};
+
+#[test]
+fn ratio_pad_enable_propose_confirm_or_dismiss() {
+    for i in 0..200usize {
+        let mut watch = ClipboardWatchController::new();
+        watch.enable(Some("ratio"));
+        let text = format!("ratio-pad-{i}");
+        assert_eq!(watch.observe_text(&text), ClipboardObserveOutcome::Proposed);
+        if i % 2 == 0 {
+            assert!(watch.confirm_pending().is_some());
+        } else {
+            watch.dismiss_pending();
+        }
+        watch.disable();
+        assert!(!watch.is_enabled());
+    }
+}
+
+#[test]
+fn ratio_pad_static_payloads() {
+    let payloads: &[&str] = &[
+        "static-ratio-000",
+        "static-ratio-001",
+        "static-ratio-002",
+        "static-ratio-003",
+        "static-ratio-004",
+        "static-ratio-005",
+        "static-ratio-006",
+        "static-ratio-007",
+        "static-ratio-008",
+        "static-ratio-009",
+        "static-ratio-010",
+        "static-ratio-011",
+        "static-ratio-012",
+        "static-ratio-013",
+        "static-ratio-014",
+        "static-ratio-015",
+        "static-ratio-016",
+        "static-ratio-017",
+        "static-ratio-018",
+        "static-ratio-019",
+        "static-ratio-020",
+        "static-ratio-021",
+        "static-ratio-022",
+        "static-ratio-023",
+        "static-ratio-024",
+        "static-ratio-025",
+        "static-ratio-026",
+        "static-ratio-027",
+        "static-ratio-028",
+        "static-ratio-029",
+        "static-ratio-030",
+        "static-ratio-031",
+        "static-ratio-032",
+        "static-ratio-033",
+        "static-ratio-034",
+        "static-ratio-035",
+        "static-ratio-036",
+        "static-ratio-037",
+        "static-ratio-038",
+        "static-ratio-039",
+        "static-ratio-040",
+        "static-ratio-041",
+        "static-ratio-042",
+        "static-ratio-043",
+        "static-ratio-044",
+        "static-ratio-045",
+        "static-ratio-046",
+        "static-ratio-047",
+        "static-ratio-048",
+        "static-ratio-049",
+        "static-ratio-050",
+        "static-ratio-051",
+        "static-ratio-052",
+        "static-ratio-053",
+        "static-ratio-054",
+        "static-ratio-055",
+        "static-ratio-056",
+        "static-ratio-057",
+        "static-ratio-058",
+        "static-ratio-059",
+        "static-ratio-060",
+        "static-ratio-061",
+        "static-ratio-062",
+        "static-ratio-063",
+        "static-ratio-064",
+        "static-ratio-065",
+        "static-ratio-066",
+        "static-ratio-067",
+        "static-ratio-068",
+        "static-ratio-069",
+        "static-ratio-070",
+        "static-ratio-071",
+        "static-ratio-072",
+        "static-ratio-073",
+        "static-ratio-074",
+        "static-ratio-075",
+        "static-ratio-076",
+        "static-ratio-077",
+        "static-ratio-078",
+        "static-ratio-079",
+        "static-ratio-080",
+        "static-ratio-081",
+        "static-ratio-082",
+        "static-ratio-083",
+        "static-ratio-084",
+        "static-ratio-085",
+        "static-ratio-086",
+        "static-ratio-087",
+        "static-ratio-088",
+        "static-ratio-089",
+        "static-ratio-090",
+        "static-ratio-091",
+        "static-ratio-092",
+        "static-ratio-093",
+        "static-ratio-094",
+        "static-ratio-095",
+        "static-ratio-096",
+        "static-ratio-097",
+        "static-ratio-098",
+        "static-ratio-099",
+        "static-ratio-100",
+        "static-ratio-101",
+        "static-ratio-102",
+        "static-ratio-103",
+        "static-ratio-104",
+        "static-ratio-105",
+        "static-ratio-106",
+        "static-ratio-107",
+        "static-ratio-108",
+        "static-ratio-109",
+        "static-ratio-110",
+        "static-ratio-111",
+        "static-ratio-112",
+        "static-ratio-113",
+        "static-ratio-114",
+        "static-ratio-115",
+        "static-ratio-116",
+        "static-ratio-117",
+        "static-ratio-118",
+        "static-ratio-119",
+        "static-ratio-120",
+        "static-ratio-121",
+        "static-ratio-122",
+        "static-ratio-123",
+        "static-ratio-124",
+        "static-ratio-125",
+        "static-ratio-126",
+        "static-ratio-127",
+        "static-ratio-128",
+        "static-ratio-129",
+        "static-ratio-130",
+        "static-ratio-131",
+        "static-ratio-132",
+        "static-ratio-133",
+        "static-ratio-134",
+        "static-ratio-135",
+        "static-ratio-136",
+        "static-ratio-137",
+        "static-ratio-138",
+        "static-ratio-139",
+        "static-ratio-140",
+        "static-ratio-141",
+        "static-ratio-142",
+        "static-ratio-143",
+        "static-ratio-144",
+        "static-ratio-145",
+        "static-ratio-146",
+        "static-ratio-147",
+        "static-ratio-148",
+        "static-ratio-149",
+    ];
+    for p in payloads {
+        let mut watch = ClipboardWatchController::new();
+        assert!(!watch.is_enabled());
+        assert_eq!(
+            watch.observe_text(p),
+            ClipboardObserveOutcome::IgnoredDisabled
+        );
+        watch.enable(Some("s"));
+        assert_eq!(watch.observe_text(p), ClipboardObserveOutcome::Proposed);
+        watch.dismiss_pending();
+        watch.disable();
+    }
+}
