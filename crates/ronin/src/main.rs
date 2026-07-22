@@ -69,10 +69,10 @@ use ronin_app::{
     MAX_MESSAGES,
 };
 use ronin_core::{
-    clamp_sidebar_width, clipboard_attachment, list_folder_entries, parse_context_tools,
-    read_file_attachment, screenshot_attachment, ChatProvider, ContextAttachmentDraft,
-    ContextToolRef, HttpOllamaProvider, MessageRole, MessageStatus, ScreenshotCapturer,
-    ThemePreference,
+    clamp_sidebar_width, clipboard_attachment, list_folder_entries_with_policy,
+    parse_context_tools, read_file_attachment, screenshot_attachment, ChatProvider,
+    ContextAttachmentDraft, ContextToolRef, HttpOllamaProvider, MessageRole, MessageStatus,
+    ScreenshotCapturer, ThemePreference,
 };
 
 mod quick_overlay;
@@ -365,7 +365,8 @@ impl RoninWindow {
         self.file_drop_active = false;
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let workspace = self.selected_thread_workspace_root();
-        let result = ingest_dropped_paths(paths, workspace.as_deref(), &cwd);
+        let policy = self.shell.folder_list_policy().unwrap_or_default();
+        let result = ingest_dropped_paths(paths, workspace.as_deref(), &cwd, &policy);
         self.attachment_errors.clear();
         self.pending_attachments.extend(result.drafts);
         self.pending_folder_attaches.extend(result.folders);
@@ -639,6 +640,7 @@ impl RoninWindow {
         let parsed = parse_context_tools(text);
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let workspace = self.selected_thread_workspace_root();
+        let policy = self.shell.folder_list_policy().unwrap_or_default();
         let mut attachments = self.pending_attachments.clone();
         attachments.extend(self.materialize_folder_attachments());
 
@@ -659,7 +661,12 @@ impl RoninWindow {
                     }
                 }
                 ContextToolRef::Folder(path) => {
-                    match list_folder_entries(&path, workspace.as_deref(), &cwd) {
+                    match list_folder_entries_with_policy(
+                        &path,
+                        workspace.as_deref(),
+                        &cwd,
+                        &policy,
+                    ) {
                         Ok(listing) => {
                             let state = FolderAttachState::from_listing(listing);
                             match state.to_context_draft() {
@@ -744,6 +751,7 @@ impl RoninWindow {
     fn composer_attachment_previews(&self) -> Vec<AttachmentPreview> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let workspace = self.selected_thread_workspace_root();
+        let policy = self.shell.folder_list_policy().unwrap_or_default();
         let mut drafts = self.pending_attachments.clone();
         // Launch `--attach` previews resolve against process CWD only.
         for path in &self.preattached_files {
@@ -760,7 +768,9 @@ impl RoninWindow {
                     }
                 }
                 ContextToolRef::Folder(path) => {
-                    if let Ok(listing) = list_folder_entries(&path, workspace.as_deref(), &cwd) {
+                    if let Ok(listing) =
+                        list_folder_entries_with_policy(&path, workspace.as_deref(), &cwd, &policy)
+                    {
                         let state = FolderAttachState::from_listing(listing);
                         if let Ok(draft) = state.to_context_draft() {
                             drafts.push(draft);

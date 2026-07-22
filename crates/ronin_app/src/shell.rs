@@ -469,6 +469,11 @@ impl RoninShell {
             .and_then(|t| t.workspace_root.clone())
     }
 
+    /// Folder-list policy from persisted local-knowledge preferences.
+    pub fn folder_list_policy(&self) -> Result<ronin_core::FolderListPolicy> {
+        Ok(self.session.folder_list_policy()?)
+    }
+
     /// Lists available models from configured providers (best-effort).
     ///
     /// Returns `(provider_id, model_names)` pairs. Providers that are offline

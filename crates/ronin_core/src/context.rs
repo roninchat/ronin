@@ -5,7 +5,13 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use ignore::gitignore::Gitignore;
+
 use crate::domain::{Artifact, AttachmentKind, Memory};
+use crate::folder_filter::{
+    folder_root_block_reason, load_gitignore_at, path_omitted_by_policy, FolderBlockReason,
+    FolderListPolicy,
+};
 
 /// Maximum number of files included in a folder listing.
 pub const FOLDER_LIST_MAX_ENTRIES: usize = 200;
@@ -278,6 +284,14 @@ pub enum ContextToolError {
         #[source]
         source: io::Error,
     },
+    /// Folder listing blocked by never-list or allowlist policy.
+    #[error("folder {path} is blocked by privacy policy ({reason})")]
+    FolderBlocked {
+        /// User-visible folder path.
+        path: PathBuf,
+        /// Why listing was refused.
+        reason: FolderBlockReason,
+    },
 }
 
 /// Reads a file selected by explicit `@file` context (text or image).
@@ -482,12 +496,31 @@ pub struct FolderListing {
 
 /// Lists files under `path` for folder attach (bounded depth + entry count).
 ///
+/// Applies the default [`FolderListPolicy`] (gitignore + built-in deny).
 /// Relative paths resolve against `workspace_root` when set, otherwise against
 /// `process_cwd`. Absolute paths work with or without a workspace root.
 pub fn list_folder_entries(
     path: impl AsRef<Path>,
     workspace_root: Option<&Path>,
     process_cwd: impl AsRef<Path>,
+) -> std::result::Result<FolderListing, ContextToolError> {
+    list_folder_entries_with_policy(
+        path,
+        workspace_root,
+        process_cwd,
+        &FolderListPolicy::default(),
+    )
+}
+
+/// Lists files under `path` using an explicit [`FolderListPolicy`].
+///
+/// Listing never equals attaching — callers must still collect an explicit
+/// selection before building a folder attachment draft.
+pub fn list_folder_entries_with_policy(
+    path: impl AsRef<Path>,
+    workspace_root: Option<&Path>,
+    process_cwd: impl AsRef<Path>,
+    policy: &FolderListPolicy,
 ) -> std::result::Result<FolderListing, ContextToolError> {
     let requested_path = path.as_ref();
     let resolved = resolve_context_path(requested_path, workspace_root, process_cwd);
@@ -503,15 +536,37 @@ pub fn list_folder_entries(
         });
     }
 
+    if let Some(reason) = folder_root_block_reason(&resolved, policy) {
+        return Err(ContextToolError::FolderBlocked {
+            path: requested_path.to_path_buf(),
+            reason,
+        });
+    }
+
     let name = resolved
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("folder")
         .to_string();
 
+    let mut gitignores = Vec::new();
+    if policy.honor_gitignore {
+        if let Some(gi) = load_gitignore_at(&resolved) {
+            gitignores.push(gi);
+        }
+    }
+
     let mut entries = Vec::new();
     let mut truncated = false;
-    walk_folder(&resolved, &resolved, 0, &mut entries, &mut truncated)?;
+    walk_folder(
+        &resolved,
+        &resolved,
+        0,
+        policy,
+        &mut gitignores,
+        &mut entries,
+        &mut truncated,
+    )?;
     entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
     Ok(FolderListing {
@@ -526,6 +581,8 @@ fn walk_folder(
     root: &Path,
     dir: &Path,
     depth: usize,
+    policy: &FolderListPolicy,
+    gitignores: &mut Vec<Gitignore>,
     entries: &mut Vec<FolderEntry>,
     truncated: &mut bool,
 ) -> std::result::Result<(), ContextToolError> {
@@ -547,12 +604,34 @@ fn walk_folder(
             Ok(m) => m,
             Err(_) => continue,
         };
-        if meta.is_dir() {
+        let is_dir = meta.is_dir();
+        if path_omitted_by_policy(root, &path, is_dir, meta.len(), policy, gitignores) {
+            continue;
+        }
+        if is_dir {
             if depth >= FOLDER_LIST_MAX_DEPTH {
                 *truncated = true;
                 continue;
             }
-            walk_folder(root, &path, depth + 1, entries, truncated)?;
+            let mut pushed_gitignore = false;
+            if policy.honor_gitignore {
+                if let Some(gi) = load_gitignore_at(&path) {
+                    gitignores.push(gi);
+                    pushed_gitignore = true;
+                }
+            }
+            walk_folder(
+                root,
+                &path,
+                depth + 1,
+                policy,
+                gitignores,
+                entries,
+                truncated,
+            )?;
+            if pushed_gitignore {
+                gitignores.pop();
+            }
             if *truncated && entries.len() >= FOLDER_LIST_MAX_ENTRIES {
                 return Ok(());
             }
