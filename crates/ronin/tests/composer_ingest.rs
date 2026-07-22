@@ -6,8 +6,12 @@ use ronin::composer_ingest::{
     drop_overlay_should_show, ingest_dropped_paths, paste_image_bytes, paste_rgba_image,
     DropIngestResult,
 };
-use ronin_core::{AttachmentKind, MAX_IMAGE_ATTACHMENT_BYTES};
+use ronin_core::{AttachmentKind, FolderListPolicy, MAX_IMAGE_ATTACHMENT_BYTES};
 use tempfile::TempDir;
+
+fn default_policy() -> FolderListPolicy {
+    FolderListPolicy::default()
+}
 
 fn write_text(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
@@ -28,7 +32,12 @@ fn ingest_dropped_paths_should_attach_multiple_supported_files() {
     let b = write_bytes(temp.path(), "b.png", b"\x89PNG\r\n\x1a\nfake");
     // tiny valid-enough png header; read_file_attachment only checks extension + size for images
 
-    let result = ingest_dropped_paths(&[a.clone(), b.clone()], None, temp.path());
+    let result = ingest_dropped_paths(
+        &[a.clone(), b.clone()],
+        None,
+        temp.path(),
+        &default_policy(),
+    );
     assert_eq!(result.drafts.len(), 2, "errors: {:?}", result.errors);
     assert!(result.errors.is_empty());
     assert_eq!(result.drafts[0].kind, AttachmentKind::File);
@@ -41,7 +50,7 @@ fn ingest_dropped_paths_should_attach_multiple_supported_files() {
 fn ingest_dropped_paths_should_report_unsupported_types_clearly() {
     let temp = TempDir::new().unwrap();
     let bin = write_bytes(temp.path(), "blob.bin", &[0, 1, 2, 3, 255, 0]);
-    let result = ingest_dropped_paths(&[bin], None, temp.path());
+    let result = ingest_dropped_paths(&[bin], None, temp.path(), &default_policy());
     assert!(result.drafts.is_empty());
     assert_eq!(result.errors.len(), 1);
     let msg = result.errors[0].to_lowercase();
@@ -58,7 +67,7 @@ fn ingest_dropped_paths_should_partial_succeed_when_some_fail() {
     let ok = write_text(temp.path(), "ok.md", "# hi");
     let bad = write_bytes(temp.path(), "x.bin", b"abc\0def\xff");
     let DropIngestResult { drafts, errors, .. } =
-        ingest_dropped_paths(&[ok, bad], None, temp.path());
+        ingest_dropped_paths(&[ok, bad], None, temp.path(), &default_policy());
     assert_eq!(drafts.len(), 1);
     assert_eq!(errors.len(), 1);
     assert_eq!(drafts[0].name, "ok.md");
@@ -72,11 +81,32 @@ fn ingest_dropped_folder_should_open_folder_attach_selection() {
     std::fs::write(dir.join("a.md"), "one").unwrap();
     std::fs::write(dir.join("b.md"), "two").unwrap();
 
-    let result = ingest_dropped_paths(&[dir], None, temp.path());
+    let result = ingest_dropped_paths(&[dir], None, temp.path(), &default_policy());
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert!(result.drafts.is_empty());
     assert_eq!(result.folders.len(), 1);
     assert_eq!(result.folders[0].selected_count(), 2);
+}
+
+#[test]
+fn ingest_dropped_folder_honors_never_list_policy() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path().join("secrets");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("x.txt"), "nope").unwrap();
+    let policy = FolderListPolicy {
+        never_list: vec![dir.clone()],
+        ..FolderListPolicy::default()
+    };
+    let result = ingest_dropped_paths(&[dir], None, temp.path(), &policy);
+    assert!(result.folders.is_empty());
+    assert_eq!(result.errors.len(), 1);
+    assert!(
+        result.errors[0].to_lowercase().contains("blocked")
+            || result.errors[0].to_lowercase().contains("never"),
+        "unexpected: {}",
+        result.errors[0]
+    );
 }
 
 #[test]

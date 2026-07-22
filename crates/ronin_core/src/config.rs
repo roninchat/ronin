@@ -186,6 +186,20 @@ impl Default for LoggingConfig {
     }
 }
 
+/// Local-knowledge privacy preferences for folder listing / indexing.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct LocalKnowledgeConfig {
+    /// Absolute paths that must never be listed or indexed.
+    #[serde(default)]
+    pub never_list: Vec<String>,
+    /// When true, only [`Self::allowlist`] roots are eligible for listing/indexing.
+    #[serde(default)]
+    pub allowlist_enabled: bool,
+    /// Approved roots when allowlist mode is enabled.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+}
+
 /// The root configuration object loaded from config.toml.
 #[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone)]
 pub struct RoninConfig {
@@ -209,6 +223,9 @@ pub struct RoninConfig {
     /// Persistent file logging preferences.
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Folder listing / local-knowledge privacy controls.
+    #[serde(default)]
+    pub local_knowledge: LocalKnowledgeConfig,
 }
 
 /// Portable provider settings for import/export (never includes secrets).

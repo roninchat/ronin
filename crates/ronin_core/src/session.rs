@@ -1,6 +1,7 @@
 //! Open Ronin application session backed by local filesystem state.
 
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use ronin_db::{
     default_log_dir, init_tracing_with, FileLogOptions, RoninDb, DEFAULT_MAX_LOG_FILE_BYTES,
@@ -176,6 +177,102 @@ impl RoninSession {
         self.db
             .update_thread_workspace_root(thread_id, None)
             .map_err(Into::into)
+    }
+
+    /// Builds the folder-list policy from persisted local-knowledge preferences.
+    pub fn folder_list_policy(&self) -> Result<crate::FolderListPolicy> {
+        let lk = self.load_config()?.local_knowledge;
+        Ok(crate::FolderListPolicy {
+            honor_gitignore: true,
+            apply_built_in_deny: true,
+            never_list: lk.never_list.iter().map(PathBuf::from).collect(),
+            allowlist_enabled: lk.allowlist_enabled,
+            allowlist: lk.allowlist.iter().map(PathBuf::from).collect(),
+        })
+    }
+
+    /// Returns persisted never-list paths (never-list / never-index).
+    pub fn list_never_list_paths(&self) -> Result<Vec<PathBuf>> {
+        Ok(self
+            .load_config()?
+            .local_knowledge
+            .never_list
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
+    }
+
+    /// Marks a directory as never-list / never-index.
+    pub fn add_never_list_path(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.mutate_path_list(true, path, true)
+    }
+
+    /// Removes a path from the never-list registry.
+    pub fn remove_never_list_path(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.mutate_path_list(true, path, false)
+    }
+
+    /// Whether folder allowlist mode is enabled.
+    pub fn folder_allowlist_enabled(&self) -> Result<bool> {
+        Ok(self.load_config()?.local_knowledge.allowlist_enabled)
+    }
+
+    /// Enables or disables folder allowlist mode.
+    pub fn set_folder_allowlist_enabled(&self, enabled: bool) -> Result<()> {
+        let mut config = self.load_config()?;
+        if config.local_knowledge.allowlist_enabled != enabled {
+            config.local_knowledge.allowlist_enabled = enabled;
+            self.save_config(&config)?;
+        }
+        Ok(())
+    }
+
+    /// Returns approved allowlist roots.
+    pub fn list_folder_allowlist_roots(&self) -> Result<Vec<PathBuf>> {
+        Ok(self
+            .load_config()?
+            .local_knowledge
+            .allowlist
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
+    }
+
+    /// Adds an approved root for allowlist mode.
+    pub fn add_folder_allowlist_root(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.mutate_path_list(false, path, true)
+    }
+
+    /// Removes a root from the folder allowlist.
+    pub fn remove_folder_allowlist_root(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.mutate_path_list(false, path, false)
+    }
+
+    fn mutate_path_list(&self, never_list: bool, path: impl AsRef<Path>, add: bool) -> Result<()> {
+        let absolute = if add {
+            require_existing_dir(path.as_ref())?
+        } else {
+            crate::absolutize_path(path.as_ref())
+        };
+        let key = absolute.to_string_lossy().into_owned();
+        let mut config = self.load_config()?;
+        let list = if never_list {
+            &mut config.local_knowledge.never_list
+        } else {
+            &mut config.local_knowledge.allowlist
+        };
+        let before = list.len();
+        if add {
+            if !list.iter().any(|p| p == &key) {
+                list.push(key);
+            }
+        } else {
+            list.retain(|p| p != &key);
+        }
+        if list.len() != before {
+            self.save_config(&config)?;
+        }
+        Ok(())
     }
 
     /// Creates and persists a new message in the given thread.
@@ -570,4 +667,16 @@ fn peek_logging_config(config_dir: &std::path::Path) -> LoggingConfig {
     toml::from_str::<RoninConfig>(&data)
         .map(|c| c.logging)
         .unwrap_or_default()
+}
+
+fn require_existing_dir(path: &Path) -> Result<PathBuf> {
+    let meta = std::fs::metadata(path).map_err(|_| RoninError::InvalidPrivacyPath {
+        path: path.to_path_buf(),
+    })?;
+    if !meta.is_dir() {
+        return Err(RoninError::InvalidPrivacyPath {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(crate::absolutize_path(path))
 }
