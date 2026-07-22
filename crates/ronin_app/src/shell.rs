@@ -3,9 +3,10 @@
 use std::sync::mpsc;
 
 use ronin_core::{
-    ChatProvider, ChatStreamEvent, ContextAttachmentDraft, HttpOllamaProvider, Message,
-    MessageRole, MessageStatus, OllamaProvider, OpenAiCompatibleProvider, RoninError, RoninPaths,
-    RoninSession, Thread,
+    shape_generation_notification, ChatProvider, ChatStreamEvent, ContextAttachmentDraft,
+    DesktopNotificationRequest, GenerationNotifyInput, GenerationNotifyKind, HttpOllamaProvider,
+    Message, MessageRole, MessageStatus, NotificationPrefs, OllamaProvider,
+    OpenAiCompatibleProvider, RoninError, RoninPaths, RoninSession, Thread,
 };
 
 use crate::branches::{leaf_under_root, sibling_branch_nav, MessageNode};
@@ -166,6 +167,8 @@ pub struct RoninShell {
     manual_titles: std::collections::HashSet<String>,
     /// Receiver for background model title-generation results.
     title_gen_rx: Option<mpsc::Receiver<TitleGenResult>>,
+    /// Shaped desktop notifications waiting for the host port to deliver.
+    pending_desktop_notifications: Vec<DesktopNotificationRequest>,
 }
 
 /// One thread's active streaming generation.
@@ -292,6 +295,42 @@ impl RoninShell {
             active_generations: std::collections::HashMap::new(),
             manual_titles: std::collections::HashSet::new(),
             title_gen_rx: None,
+            pending_desktop_notifications: Vec::new(),
+        }
+    }
+
+    /// Drains shaped desktop notifications produced by finished generations.
+    pub fn drain_pending_desktop_notifications(&mut self) -> Vec<DesktopNotificationRequest> {
+        std::mem::take(&mut self.pending_desktop_notifications)
+    }
+
+    /// Queues a generation-completed / generation-failed notification when enabled.
+    fn enqueue_generation_notification(
+        &mut self,
+        kind: GenerationNotifyKind,
+        thread_id: &str,
+        error_summary: Option<&str>,
+    ) {
+        let enabled = self
+            .session
+            .load_config()
+            .map(|c| c.notifications.enabled)
+            .unwrap_or(true);
+        let thread_title = self
+            .state
+            .threads
+            .iter()
+            .find(|t| t.id == thread_id)
+            .map(|t| t.title.clone());
+        let input = GenerationNotifyInput {
+            kind,
+            thread_id: thread_id.to_string(),
+            thread_title,
+            error_summary: error_summary.map(str::to_string),
+        };
+        if let Some(request) = shape_generation_notification(&NotificationPrefs { enabled }, &input)
+        {
+            self.pending_desktop_notifications.push(request);
         }
     }
 
@@ -1092,6 +1131,11 @@ impl RoninShell {
                             }
                         }
                     }
+                    self.enqueue_generation_notification(
+                        GenerationNotifyKind::Completed,
+                        thread_id,
+                        None,
+                    );
                     return true;
                 }
                 Ok(StreamUpdate::Error(e)) => {
@@ -1109,6 +1153,11 @@ impl RoninShell {
                         }
                     }
                     tracing::error!(%thread_id, "provider stream error: {e}");
+                    self.enqueue_generation_notification(
+                        GenerationNotifyKind::Failed,
+                        thread_id,
+                        Some(&friendly),
+                    );
                     return true;
                 }
                 Err(mpsc::TryRecvError::Empty) => {

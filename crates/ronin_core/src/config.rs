@@ -186,6 +186,26 @@ impl Default for LoggingConfig {
     }
 }
 
+/// Desktop notification preferences from `config.toml`.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NotificationsConfig {
+    /// When false, generation-done / generation-failed notifications are not requested.
+    #[serde(default = "default_notifications_enabled")]
+    pub enabled: bool,
+}
+
+fn default_notifications_enabled() -> bool {
+    true
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_notifications_enabled(),
+        }
+    }
+}
+
 /// The root configuration object loaded from config.toml.
 #[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone)]
 pub struct RoninConfig {
@@ -209,6 +229,9 @@ pub struct RoninConfig {
     /// Persistent file logging preferences.
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Desktop notification preferences.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
 }
 
 /// Portable provider settings for import/export (never includes secrets).

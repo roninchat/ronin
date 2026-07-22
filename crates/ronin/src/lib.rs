@@ -35,6 +35,9 @@ pub mod attachment_preview;
 /// Wayland portal screenshot capture with CLI fallbacks.
 pub mod screenshot_capture;
 
+/// XDG Desktop Portal notifications for generation done/fail.
+pub mod desktop_notifications;
+
 /// Syntax highlighting for fenced Markdown code blocks.
 pub mod syntax_highlight;
 
