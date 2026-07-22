@@ -18,9 +18,12 @@ use crate::domain::{
     MessageRole, RoninPaths, Thread,
 };
 use crate::error::{Result, RoninError};
+use crate::trust::scrub_ambient_payload;
 use crate::workspace_index::{
-    collect_workspace_index_documents, workspace_index_storage_path, WorkspaceIndexCaps,
-    WorkspaceIndexInfo, WorkspaceIndexPhase, WORKSPACE_INDEX_STORAGE_DIR,
+    clamp_workspace_index_search_limit, collect_workspace_index_documents,
+    workspace_index_hit_attachment, workspace_index_storage_path, WorkspaceIndexCaps,
+    WorkspaceIndexHit, WorkspaceIndexInfo, WorkspaceIndexPhase,
+    WORKSPACE_INDEX_SEARCH_DEFAULT_LIMIT, WORKSPACE_INDEX_STORAGE_DIR,
 };
 
 /// Open Ronin application session backed by local filesystem state.
@@ -272,6 +275,76 @@ impl RoninSession {
     /// Absolute path where this thread's lexical index DB would live.
     pub fn workspace_index_storage_path_for(&self, thread_id: &str) -> PathBuf {
         workspace_index_storage_path(&self.paths.data_dir, thread_id)
+    }
+
+    /// Lexical search over a thread's indexed workspace. Returns candidates only.
+    ///
+    /// Requires a completed index. Does not attach or inject into chat assembly.
+    pub fn search_workspace_index(
+        &self,
+        thread_id: &str,
+        query: &str,
+    ) -> Result<Vec<WorkspaceIndexHit>> {
+        self.search_workspace_index_limited(thread_id, query, WORKSPACE_INDEX_SEARCH_DEFAULT_LIMIT)
+    }
+
+    /// Lexical search with an explicit hit limit (clamped).
+    pub fn search_workspace_index_limited(
+        &self,
+        thread_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<WorkspaceIndexHit>> {
+        let store = self.open_ready_workspace_index_store(thread_id)?;
+        let hits = store.search(query, clamp_workspace_index_search_limit(limit))?;
+        Ok(hits
+            .into_iter()
+            .map(|h| WorkspaceIndexHit {
+                relative_path: h.relative_path,
+                snippet: scrub_ambient_payload(&h.snippet),
+            })
+            .collect())
+    }
+
+    /// Build explicit attachment drafts for selected index hit paths.
+    ///
+    /// This is the attach gate: callers must pass paths the user chose. Bodies
+    /// come from the lexical store; missing paths are skipped.
+    pub fn attach_workspace_index_hits<P: AsRef<str>>(
+        &self,
+        thread_id: &str,
+        relative_paths: &[P],
+    ) -> Result<Vec<crate::ContextAttachmentDraft>> {
+        if relative_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let store = self.open_ready_workspace_index_store(thread_id)?;
+        let mut drafts = Vec::new();
+        for path in relative_paths {
+            let path = path.as_ref();
+            if let Some(body) = store.document_body(path)? {
+                drafts.push(workspace_index_hit_attachment(path, &body));
+            }
+        }
+        Ok(drafts)
+    }
+
+    fn open_ready_workspace_index_store(&self, thread_id: &str) -> Result<WorkspaceLexicalStore> {
+        let info = self.workspace_index_info(thread_id)?;
+        if info.phase != WorkspaceIndexPhase::Done {
+            return Err(RoninError::WorkspaceIndex(
+                "workspace index is not ready for search; build or rebuild first".into(),
+            ));
+        }
+        let storage = info.storage_path.ok_or_else(|| {
+            RoninError::WorkspaceIndex("workspace index has no storage path".into())
+        })?;
+        if !storage.exists() {
+            return Err(RoninError::WorkspaceIndex(
+                "workspace index store is missing; rebuild the index".into(),
+            ));
+        }
+        Ok(WorkspaceLexicalStore::open(&storage)?)
     }
 
     fn run_workspace_index_build(

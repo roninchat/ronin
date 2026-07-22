@@ -8,7 +8,7 @@
 //! - [`config`]: TOML preference/provider configuration types.
 //! - [`context`]: explicit user context parsing and attachment drafts.
 //! - [`folder_filter`]: ignore/deny/allow policy for folder listing walks.
-//! - [`workspace_index`]: user-triggered one-shot lexical workspace index.
+//! - [`workspace_index`]: user-triggered one-shot lexical workspace index + search/attach gate.
 //! - [`screenshot`]: screenshot capture abstraction (portal / fallback).
 //! - [`providers`]: Ronin-owned provider traits and HTTP adapters.
 //! - [`session`]: filesystem/database-backed application session.
@@ -65,9 +65,14 @@ pub use trust::{
     AllowedTool, ContextOrigin, ToolDisposition, AMBIENT_REDACTED, FORBIDDEN_AGENCY_TOOL_NAMES,
 };
 pub use workspace_index::{
-    collect_workspace_index_documents, workspace_index_root_block, workspace_index_storage_path,
-    WorkspaceIndexBlock, WorkspaceIndexCaps, WorkspaceIndexCollectResult, WorkspaceIndexDocument,
-    WorkspaceIndexInfo, WorkspaceIndexPhase, WORKSPACE_INDEX_MAX_BYTES, WORKSPACE_INDEX_MAX_DEPTH,
+    clamp_workspace_index_search_limit, collect_workspace_index_documents,
+    drafts_for_workspace_index_include, workspace_index_hit_attachment,
+    workspace_index_hit_attachment_origin, workspace_index_origin_may_inject,
+    workspace_index_root_block, workspace_index_storage_path, WorkspaceIndexBlock,
+    WorkspaceIndexCaps, WorkspaceIndexCollectResult, WorkspaceIndexDocument, WorkspaceIndexHit,
+    WorkspaceIndexHitSelection, WorkspaceIndexIncludeGate, WorkspaceIndexInfo, WorkspaceIndexPhase,
+    WORKSPACE_INDEX_INCLUDE_GATE_LABEL, WORKSPACE_INDEX_MAX_BYTES, WORKSPACE_INDEX_MAX_DEPTH,
     WORKSPACE_INDEX_MAX_DURATION, WORKSPACE_INDEX_MAX_ENTRIES, WORKSPACE_INDEX_MAX_FILE_BYTES,
+    WORKSPACE_INDEX_SEARCH_DEFAULT_LIMIT, WORKSPACE_INDEX_SEARCH_MAX_LIMIT,
     WORKSPACE_INDEX_STORAGE_DIR,
 };

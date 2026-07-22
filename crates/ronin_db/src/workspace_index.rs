@@ -1,7 +1,8 @@
 //! Per-thread lexical workspace index corpus (SQLite FTS5).
 //!
 //! Lives under Ronin data (`workspace_indexes/{thread_id}.db`), separate from
-//! chat DB rows. Search/attach gating is #74 — this module is build/store/delete.
+//! chat DB rows. Build/store/delete (#73) plus lexical search (#74). Attach into
+//! chat still requires an explicit user gate in `ronin_core` / shell.
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,15 @@ pub struct LexicalIndexDocument {
     pub body: String,
     /// Stored body byte length.
     pub byte_len: u64,
+}
+
+/// One FTS candidate hit (path + snippet). Never auto-merged into chat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LexicalSearchHit {
+    /// Path relative to the workspace root.
+    pub relative_path: String,
+    /// Short excerpt around the match for candidate UI.
+    pub snippet: String,
 }
 
 /// Open handle to a thread's on-disk lexical index database.
@@ -140,6 +150,85 @@ impl WorkspaceLexicalStore {
         Ok(n > 0)
     }
 
+    /// Returns the stored body for `relative_path`, if present.
+    pub fn document_body(&self, relative_path: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT body FROM docs WHERE path = ?1")
+            .map_err(|source| RoninDbError::WorkspaceIndexStore {
+                path: self.path.clone(),
+                message: format!("prepare body: {source}"),
+            })?;
+        let mut rows = stmt.query(params![relative_path]).map_err(|source| {
+            RoninDbError::WorkspaceIndexStore {
+                path: self.path.clone(),
+                message: format!("query body: {source}"),
+            }
+        })?;
+        match rows
+            .next()
+            .map_err(|source| RoninDbError::WorkspaceIndexStore {
+                path: self.path.clone(),
+                message: format!("next body: {source}"),
+            })? {
+            Some(row) => {
+                let body: String =
+                    row.get(0)
+                        .map_err(|source| RoninDbError::WorkspaceIndexStore {
+                            path: self.path.clone(),
+                            message: format!("read body: {source}"),
+                        })?;
+                Ok(Some(body))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Lexical FTS search over the corpus. Returns candidate hits only.
+    ///
+    /// Empty / whitespace-only queries yield no hits. Results are ranked by FTS
+    /// relevance and capped by `limit`.
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<LexicalSearchHit>> {
+        let Some(match_query) = prepare_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT path, snippet(docs_fts, 1, '', '', '…', 32)
+                 FROM docs_fts
+                 WHERE docs_fts MATCH ?1
+                 ORDER BY rank
+                 LIMIT ?2",
+            )
+            .map_err(|source| RoninDbError::WorkspaceIndexStore {
+                path: self.path.clone(),
+                message: format!("prepare search: {source}"),
+            })?;
+        let rows = stmt
+            .query_map(params![match_query, limit as i64], |row| {
+                Ok(LexicalSearchHit {
+                    relative_path: row.get(0)?,
+                    snippet: row.get(1)?,
+                })
+            })
+            .map_err(|source| RoninDbError::WorkspaceIndexStore {
+                path: self.path.clone(),
+                message: format!("search: {source}"),
+            })?;
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row.map_err(|source| RoninDbError::WorkspaceIndexStore {
+                path: self.path.clone(),
+                message: format!("search row: {source}"),
+            })?);
+        }
+        Ok(hits)
+    }
+
     /// Deletes all corpus rows (keeps empty DB file).
     pub fn clear(&self) -> Result<()> {
         self.conn
@@ -165,4 +254,30 @@ pub fn delete_workspace_lexical_store(path: impl AsRef<Path>) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Build a safe FTS5 MATCH query from free-form user text.
+///
+/// Tokens are stripped to alphanumeric / `_` / `-` / `.` and matched as prefixes.
+/// Returns `None` when nothing searchable remains.
+pub fn prepare_fts_query(raw: &str) -> Option<String> {
+    let tokens: Vec<String> = raw
+        .split_whitespace()
+        .filter_map(|token| {
+            let cleaned: String = token
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                .collect();
+            if cleaned.is_empty() {
+                None
+            } else {
+                Some(format!("{cleaned}*"))
+            }
+        })
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" "))
+    }
 }

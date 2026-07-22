@@ -10,7 +10,8 @@ pub use logging::{
     DEFAULT_MAX_LOG_FILE_BYTES, REDACTED_PLACEHOLDER,
 };
 pub use workspace_index::{
-    delete_workspace_lexical_store, LexicalIndexDocument, WorkspaceLexicalStore,
+    delete_workspace_lexical_store, prepare_fts_query, LexicalIndexDocument, LexicalSearchHit,
+    WorkspaceLexicalStore,
 };
 
 use std::path::{Path, PathBuf};

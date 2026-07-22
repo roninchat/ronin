@@ -1,8 +1,9 @@
-//! User-triggered one-shot lexical workspace index (M3.0 #73).
+//! User-triggered one-shot lexical workspace index (M3.0 #73 / #74).
 //!
 //! Build / rebuild / cancel / delete are explicit session actions. Collection
-//! reuses [`FolderListPolicy`] ignore/deny/allow rules. Index APIs never merge
-//! corpus text into provider chat assembly — that stays behind #74's attach gate.
+//! reuses [`FolderListPolicy`] ignore/deny/allow rules. Search returns
+//! candidates only; attaching selected hits (or a visible per-send include)
+//! is required before any hit may enter provider chat assembly.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,11 +11,13 @@ use std::time::{Duration, Instant};
 
 use ignore::gitignore::Gitignore;
 
+use crate::context::ContextAttachmentDraft;
+use crate::domain::AttachmentKind;
 use crate::folder_filter::{
     absolutize_path, folder_root_block_reason, load_gitignore_at, path_omitted_by_policy,
     FolderBlockReason, FolderListPolicy,
 };
-use crate::trust::scrub_ambient_payload;
+use crate::trust::{may_inject_into_chat_request, scrub_ambient_payload, ContextOrigin};
 
 /// Default maximum files admitted into one index build.
 pub const WORKSPACE_INDEX_MAX_ENTRIES: usize = 5_000;
@@ -424,4 +427,179 @@ pub fn workspace_index_root_block(
         return Some(WorkspaceIndexBlock::InvalidRoot);
     }
     folder_root_block_reason(&resolved, policy).map(WorkspaceIndexBlock::Folder)
+}
+
+/// Default cap on lexical search hits returned to the UI.
+pub const WORKSPACE_INDEX_SEARCH_DEFAULT_LIMIT: usize = 50;
+
+/// Hard ceiling on lexical search hits in one query.
+pub const WORKSPACE_INDEX_SEARCH_MAX_LIMIT: usize = 200;
+
+/// Visible label for the optional per-send include control.
+pub const WORKSPACE_INDEX_INCLUDE_GATE_LABEL: &str = "Include selected search hits in this send";
+
+/// One lexical search candidate (path + snippet). Never auto-merged into chat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceIndexHit {
+    /// Path relative to the workspace root.
+    pub relative_path: String,
+    /// Short excerpt around the match.
+    pub snippet: String,
+}
+
+impl WorkspaceIndexHit {
+    /// Trust origin for a bare search candidate (must not inject).
+    pub fn context_origin(&self) -> ContextOrigin {
+        ContextOrigin::IndexSearchHit
+    }
+}
+
+/// Explicit user selection of search hits awaiting attach / include.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceIndexHitSelection {
+    paths: Vec<String>,
+}
+
+impl WorkspaceIndexHitSelection {
+    /// Empty selection.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace selection with `paths` (deduped, order-preserving).
+    pub fn set_paths(&mut self, paths: impl IntoIterator<Item = impl Into<String>>) {
+        let mut seen = std::collections::HashSet::new();
+        self.paths = paths
+            .into_iter()
+            .map(Into::into)
+            .filter(|p| seen.insert(p.clone()))
+            .collect();
+    }
+
+    /// Add one relative path if not already selected.
+    pub fn select(&mut self, relative_path: impl Into<String>) {
+        let path = relative_path.into();
+        if !self.paths.iter().any(|p| p == &path) {
+            self.paths.push(path);
+        }
+    }
+
+    /// Remove one relative path from the selection.
+    pub fn deselect(&mut self, relative_path: &str) {
+        self.paths.retain(|p| p != relative_path);
+    }
+
+    /// Clear all selected paths.
+    pub fn clear(&mut self) {
+        self.paths.clear();
+    }
+
+    /// Currently selected relative paths.
+    pub fn paths(&self) -> &[String] {
+        &self.paths
+    }
+
+    /// Whether any path is selected.
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+}
+
+/// Optional per-send include control for selected search hits.
+///
+/// Labeled, visible, and **off by default**. Enabling it is an explicit user
+/// action equivalent to confirming include for the current send only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceIndexIncludeGate {
+    enabled: bool,
+}
+
+impl Default for WorkspaceIndexIncludeGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WorkspaceIndexIncludeGate {
+    /// New gate: disabled (safe default).
+    pub fn new() -> Self {
+        Self { enabled: false }
+    }
+
+    /// User-visible control label.
+    pub fn label(&self) -> &'static str {
+        WORKSPACE_INDEX_INCLUDE_GATE_LABEL
+    }
+
+    /// Whether include is currently on for this send.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Explicitly enable or disable the gate.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Trust origin when this gate is considered for injection.
+    pub fn context_origin(&self) -> ContextOrigin {
+        if self.enabled {
+            ContextOrigin::VisiblePerSendInclude
+        } else {
+            ContextOrigin::IndexSearchHit
+        }
+    }
+}
+
+/// Clamp a requested search limit into the documented range.
+pub fn clamp_workspace_index_search_limit(limit: usize) -> usize {
+    limit.clamp(1, WORKSPACE_INDEX_SEARCH_MAX_LIMIT)
+}
+
+/// Build a context attachment draft from an explicitly chosen index hit body.
+///
+/// Callers must only invoke this after an explicit attach action. The draft is
+/// tagged as [`ContextOrigin::ExplicitAttachment`] for injection checks.
+pub fn workspace_index_hit_attachment(relative_path: &str, body: &str) -> ContextAttachmentDraft {
+    let scrubbed = scrub_ambient_payload(body);
+    let name = relative_path
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(relative_path)
+        .to_string();
+    let size_bytes = Some(scrubbed.len() as u64);
+    ContextAttachmentDraft {
+        kind: AttachmentKind::File,
+        name,
+        mime_type: "text/plain".to_string(),
+        content: Some(scrubbed.clone()),
+        path: None,
+        context_block: format!("[Attached workspace file: {relative_path}]\n{scrubbed}"),
+        size_bytes,
+    }
+}
+
+/// Trust origin for drafts produced by [`workspace_index_hit_attachment`].
+pub fn workspace_index_hit_attachment_origin() -> ContextOrigin {
+    ContextOrigin::ExplicitAttachment
+}
+
+/// Drafts that may enter chat when the include gate is on and selection is non-empty.
+///
+/// Returns an empty list when the gate is off or nothing is selected — search
+/// hits never silent-merge.
+pub fn drafts_for_workspace_index_include(
+    gate: &WorkspaceIndexIncludeGate,
+    selected_drafts: &[ContextAttachmentDraft],
+) -> Vec<ContextAttachmentDraft> {
+    if !gate.is_enabled() || selected_drafts.is_empty() {
+        return Vec::new();
+    }
+    selected_drafts.to_vec()
+}
+
+/// Whether a workspace-index-related origin may enter provider chat assembly.
+pub fn workspace_index_origin_may_inject(origin: ContextOrigin) -> bool {
+    may_inject_into_chat_request(origin)
 }
