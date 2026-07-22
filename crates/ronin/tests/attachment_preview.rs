@@ -70,7 +70,7 @@ fn preview_from_draft_should_show_size_type_and_snippet_for_text_files() {
     let body = "hello world\nsecond line";
     std::fs::write(&path, body).expect("write");
 
-    let draft = read_file_attachment(&path, temp.path()).expect("read");
+    let draft = read_file_attachment(&path, None, temp.path()).expect("read");
     match preview_from_draft(&draft) {
         AttachmentPreview::File {
             name,
@@ -96,7 +96,7 @@ fn file_snippet_should_truncate_long_text() {
     let body: String = "x".repeat(FILE_SNIPPET_CHARS + 40);
     std::fs::write(&path, &body).expect("write");
 
-    let draft = read_file_attachment(&path, temp.path()).expect("read");
+    let draft = read_file_attachment(&path, None, temp.path()).expect("read");
     match preview_from_draft(&draft) {
         AttachmentPreview::File {
             snippet: Some(snippet),
@@ -146,7 +146,7 @@ fn screenshot_and_image_attachment_flow_through_draft_builders() {
     std::fs::write(&img, b"<svg></svg>").expect("svg");
 
     let shot_draft = screenshot_attachment(&shot).expect("screenshot");
-    let img_draft = read_file_attachment(&img, temp.path()).expect("image");
+    let img_draft = read_file_attachment(&img, None, temp.path()).expect("image");
 
     assert!(matches!(
         preview_from_draft(&shot_draft),

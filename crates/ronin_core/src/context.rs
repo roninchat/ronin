@@ -5,13 +5,124 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use ignore::gitignore::Gitignore;
+
 use crate::domain::{Artifact, AttachmentKind, Memory};
+use crate::folder_filter::{
+    absolutize_path, folder_root_block_reason, load_gitignore_at, path_omitted_by_policy,
+    FolderBlockReason, FolderListPolicy,
+};
 
-/// Maximum number of files included in a folder listing.
-pub const FOLDER_LIST_MAX_ENTRIES: usize = 200;
+/// Default maximum number of files included in a folder listing (initial reveal).
+///
+/// Raised above the M2 shallow walk (200) so `@folder` reaches more of a project
+/// before the user opts into progressive deepen or a lexical index.
+pub const FOLDER_LIST_MAX_ENTRIES: usize = 500;
 
-/// Maximum directory nesting depth for folder listings (root = 0).
-pub const FOLDER_LIST_MAX_DEPTH: usize = 2;
+/// Default maximum directory nesting depth for folder listings (root = 0).
+///
+/// Raised above the M2 shallow walk (2) for deeper on-demand listing under caps.
+pub const FOLDER_LIST_MAX_DEPTH: usize = 4;
+
+/// Hard ceiling for progressive deepen of directory nesting (documented).
+pub const FOLDER_LIST_DEPTH_CEILING: usize = 10;
+
+/// Hard ceiling for progressive deepen of listing entry count (documented).
+pub const FOLDER_LIST_ENTRIES_CEILING: usize = 2_000;
+
+/// Step applied to [`FolderListOptions::max_depth`] on each progressive deepen.
+pub const FOLDER_LIST_DEPTH_STEP: usize = 2;
+
+/// Step applied to [`FolderListOptions::max_entries`] on each progressive deepen.
+pub const FOLDER_LIST_ENTRIES_STEP: usize = 500;
+
+/// Options for bounded / progressive folder listing walks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderListOptions {
+    /// Maximum directory nesting depth (root = 0). Clamped to
+    /// [`FOLDER_LIST_DEPTH_CEILING`].
+    pub max_depth: usize,
+    /// Maximum files collected. Clamped to [`FOLDER_LIST_ENTRIES_CEILING`].
+    pub max_entries: usize,
+    /// Optional case-insensitive substring filter on relative paths.
+    ///
+    /// When set, only matching files are collected (directories are still walked
+    /// so deep matches remain reachable under caps).
+    pub browse_filter: Option<String>,
+}
+
+impl Default for FolderListOptions {
+    fn default() -> Self {
+        Self {
+            max_depth: FOLDER_LIST_MAX_DEPTH,
+            max_entries: FOLDER_LIST_MAX_ENTRIES,
+            browse_filter: None,
+        }
+    }
+}
+
+impl FolderListOptions {
+    /// Clamps depth/entries to the documented progressive ceilings.
+    #[must_use]
+    pub fn clamp_to_ceilings(mut self) -> Self {
+        self.max_depth = self.max_depth.min(FOLDER_LIST_DEPTH_CEILING);
+        self.max_entries = self.max_entries.min(FOLDER_LIST_ENTRIES_CEILING);
+        self
+    }
+
+    /// Whether another progressive deepen step can raise caps further.
+    #[must_use]
+    pub fn can_deepen(&self) -> bool {
+        let depth = self.max_depth.min(FOLDER_LIST_DEPTH_CEILING);
+        let entries = self.max_entries.min(FOLDER_LIST_ENTRIES_CEILING);
+        depth < FOLDER_LIST_DEPTH_CEILING || entries < FOLDER_LIST_ENTRIES_CEILING
+    }
+
+    /// Next progressive reveal step toward the documented ceilings.
+    #[must_use]
+    pub fn deepen(&self) -> Self {
+        Self {
+            max_depth: self
+                .max_depth
+                .saturating_add(FOLDER_LIST_DEPTH_STEP)
+                .min(FOLDER_LIST_DEPTH_CEILING),
+            max_entries: self
+                .max_entries
+                .saturating_add(FOLDER_LIST_ENTRIES_STEP)
+                .min(FOLDER_LIST_ENTRIES_CEILING),
+            browse_filter: self.browse_filter.clone(),
+        }
+    }
+
+    /// Sets a browse filter (empty / whitespace clears the filter).
+    #[must_use]
+    pub fn with_browse_filter(mut self, filter: impl Into<String>) -> Self {
+        let filter = filter.into();
+        let trimmed = filter.trim();
+        self.browse_filter = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+        self
+    }
+}
+
+/// Returns whether `relative_path` matches an optional browse filter
+/// (case-insensitive substring). Empty / whitespace filters match everything.
+#[must_use]
+pub fn folder_entry_matches_browse_filter(relative_path: &str, filter: Option<&str>) -> bool {
+    let Some(filter) = filter.map(str::trim).filter(|f| !f.is_empty()) else {
+        return true;
+    };
+    relative_path
+        .to_ascii_lowercase()
+        .contains(&filter.to_ascii_lowercase())
+}
+
+fn path_matches_browse_filter(relative_path: &str, filter: Option<&str>) -> bool {
+    folder_entry_matches_browse_filter(relative_path, filter)
+}
 
 /// Default character threshold before attachment size warnings appear (~6k tokens).
 pub const DEFAULT_ATTACHMENT_WARN_CHARS: usize = 24_000;
@@ -158,6 +269,32 @@ fn is_ref_boundary(next: Option<char>) -> bool {
     next.is_none_or(char::is_whitespace)
 }
 
+/// Base directory for relative `@file` / `@folder` resolution.
+///
+/// When `workspace_root` is set (explicit thread bind), it wins. Otherwise
+/// `process_cwd` is used. Never auto-detects a git root or invents a workspace.
+pub fn context_path_base<'a>(workspace_root: Option<&'a Path>, process_cwd: &'a Path) -> &'a Path {
+    workspace_root.unwrap_or(process_cwd)
+}
+
+/// Resolves a `@file` / `@folder` path against an optional thread workspace root.
+///
+/// Absolute paths are returned unchanged. Relative paths use `workspace_root` when
+/// set; otherwise they join against `process_cwd`. Binding a workspace never
+/// attaches file contents by itself — callers still must read/list explicitly.
+pub fn resolve_context_path(
+    requested: impl AsRef<Path>,
+    workspace_root: Option<&Path>,
+    process_cwd: impl AsRef<Path>,
+) -> PathBuf {
+    let requested_path = requested.as_ref();
+    if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        context_path_base(workspace_root, process_cwd.as_ref()).join(requested_path)
+    }
+}
+
 /// Maximum file attachment size in bytes.
 pub const MAX_FILE_ATTACHMENT_BYTES: u64 = 1_048_576;
 
@@ -252,19 +389,27 @@ pub enum ContextToolError {
         #[source]
         source: io::Error,
     },
+    /// Folder listing blocked by never-list or allowlist policy.
+    #[error("folder {path} is blocked by privacy policy ({reason})")]
+    FolderBlocked {
+        /// User-visible folder path.
+        path: PathBuf,
+        /// Why listing was refused.
+        reason: FolderBlockReason,
+    },
 }
 
 /// Reads a file selected by explicit `@file` context (text or image).
+///
+/// Relative paths resolve against `workspace_root` when set, otherwise against
+/// `process_cwd`. Absolute paths work with or without a workspace root.
 pub fn read_file_attachment(
     path: impl AsRef<Path>,
-    cwd: impl AsRef<Path>,
+    workspace_root: Option<&Path>,
+    process_cwd: impl AsRef<Path>,
 ) -> std::result::Result<ContextAttachmentDraft, ContextToolError> {
     let requested_path = path.as_ref();
-    let resolved_path = if requested_path.is_absolute() {
-        requested_path.to_path_buf()
-    } else {
-        cwd.as_ref().join(requested_path)
-    };
+    let resolved_path = resolve_context_path(requested_path, workspace_root, process_cwd);
 
     let metadata =
         std::fs::metadata(&resolved_path).map_err(|source| ContextToolError::FileMetadata {
@@ -441,7 +586,7 @@ pub struct FolderEntry {
     pub size_bytes: u64,
 }
 
-/// Bounded non-recursive-deep listing of files under a folder.
+/// Bounded listing of files under a folder (depth + entry caps).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderListing {
     /// Absolute resolved folder path.
@@ -452,19 +597,66 @@ pub struct FolderListing {
     pub entries: Vec<FolderEntry>,
     /// True when max depth or max entry count truncated the listing.
     pub truncated: bool,
+    /// Options (clamped) that produced this listing — used for progressive deepen.
+    pub list_options: FolderListOptions,
 }
 
 /// Lists files under `path` for folder attach (bounded depth + entry count).
+///
+/// Applies the default [`FolderListPolicy`] (gitignore + built-in deny).
+/// Relative paths resolve against `workspace_root` when set, otherwise against
+/// `process_cwd`. Absolute paths work with or without a workspace root.
 pub fn list_folder_entries(
     path: impl AsRef<Path>,
-    cwd: impl AsRef<Path>,
+    workspace_root: Option<&Path>,
+    process_cwd: impl AsRef<Path>,
+) -> std::result::Result<FolderListing, ContextToolError> {
+    list_folder_entries_with_policy(
+        path,
+        workspace_root,
+        process_cwd,
+        &FolderListPolicy::default(),
+    )
+}
+
+/// Lists files under `path` using an explicit [`FolderListPolicy`] and default
+/// [`FolderListOptions`].
+///
+/// Listing never equals attaching — callers must still collect an explicit
+/// selection before building a folder attachment draft.
+pub fn list_folder_entries_with_policy(
+    path: impl AsRef<Path>,
+    workspace_root: Option<&Path>,
+    process_cwd: impl AsRef<Path>,
+    policy: &FolderListPolicy,
+) -> std::result::Result<FolderListing, ContextToolError> {
+    list_folder_entries_with_options(
+        path,
+        workspace_root,
+        process_cwd,
+        policy,
+        &FolderListOptions::default(),
+    )
+}
+
+/// Lists files under `path` with an explicit policy and listing options
+/// (depth/entry caps + optional browse filter).
+///
+/// Listing never equals attaching — callers must still collect an explicit
+/// selection before building a folder attachment draft. Ignore/deny/allow rules
+/// from [`FolderListPolicy`] still apply.
+pub fn list_folder_entries_with_options(
+    path: impl AsRef<Path>,
+    workspace_root: Option<&Path>,
+    process_cwd: impl AsRef<Path>,
+    policy: &FolderListPolicy,
+    options: &FolderListOptions,
 ) -> std::result::Result<FolderListing, ContextToolError> {
     let requested_path = path.as_ref();
-    let resolved = if requested_path.is_absolute() {
-        requested_path.to_path_buf()
-    } else {
-        cwd.as_ref().join(requested_path)
-    };
+    let resolved = resolve_context_path(requested_path, workspace_root, process_cwd);
+    let resolved = resolved
+        .canonicalize()
+        .unwrap_or_else(|_| absolutize_path(&resolved));
 
     let metadata =
         std::fs::metadata(&resolved).map_err(|source| ContextToolError::FileMetadata {
@@ -477,15 +669,58 @@ pub fn list_folder_entries(
         });
     }
 
+    let never_list: Vec<PathBuf> = policy
+        .never_list
+        .iter()
+        .map(|p| absolutize_path(p))
+        .collect();
+    let allowlist: Vec<PathBuf> = policy
+        .allowlist
+        .iter()
+        .map(|p| absolutize_path(p))
+        .collect();
+    let policy = FolderListPolicy {
+        honor_gitignore: policy.honor_gitignore,
+        apply_built_in_deny: policy.apply_built_in_deny,
+        never_list,
+        allowlist_enabled: policy.allowlist_enabled,
+        allowlist,
+    };
+
+    if let Some(reason) = folder_root_block_reason(&resolved, &policy) {
+        return Err(ContextToolError::FolderBlocked {
+            path: requested_path.to_path_buf(),
+            reason,
+        });
+    }
+
     let name = resolved
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("folder")
         .to_string();
 
+    let list_options = options.clone().clamp_to_ceilings();
+
+    let mut gitignores = Vec::new();
+    if policy.honor_gitignore {
+        if let Some(gi) = load_gitignore_at(&resolved) {
+            gitignores.push(gi);
+        }
+    }
+
     let mut entries = Vec::new();
     let mut truncated = false;
-    walk_folder(&resolved, &resolved, 0, &mut entries, &mut truncated)?;
+    {
+        let mut walk = FolderWalkState {
+            policy: &policy,
+            options: &list_options,
+            gitignores: &mut gitignores,
+            entries: &mut entries,
+            truncated: &mut truncated,
+        };
+        walk_folder(&resolved, &resolved, 0, &mut walk)?;
+    }
     entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
     Ok(FolderListing {
@@ -493,15 +728,23 @@ pub fn list_folder_entries(
         name,
         entries,
         truncated,
+        list_options,
     })
+}
+
+struct FolderWalkState<'a> {
+    policy: &'a FolderListPolicy,
+    options: &'a FolderListOptions,
+    gitignores: &'a mut Vec<Gitignore>,
+    entries: &'a mut Vec<FolderEntry>,
+    truncated: &'a mut bool,
 }
 
 fn walk_folder(
     root: &Path,
     dir: &Path,
     depth: usize,
-    entries: &mut Vec<FolderEntry>,
-    truncated: &mut bool,
+    walk: &mut FolderWalkState<'_>,
 ) -> std::result::Result<(), ContextToolError> {
     let read = std::fs::read_dir(dir).map_err(|source| ContextToolError::ReadFile {
         path: dir.to_path_buf(),
@@ -512,8 +755,8 @@ fn walk_folder(
     children.sort_by_key(|e| e.file_name());
 
     for child in children {
-        if entries.len() >= FOLDER_LIST_MAX_ENTRIES {
-            *truncated = true;
+        if walk.entries.len() >= walk.options.max_entries {
+            *walk.truncated = true;
             return Ok(());
         }
         let path = child.path();
@@ -521,13 +764,34 @@ fn walk_folder(
             Ok(m) => m,
             Err(_) => continue,
         };
-        if meta.is_dir() {
-            if depth >= FOLDER_LIST_MAX_DEPTH {
-                *truncated = true;
+        let is_dir = meta.is_dir();
+        if path_omitted_by_policy(
+            root,
+            &path,
+            is_dir,
+            meta.len(),
+            walk.policy,
+            walk.gitignores,
+        ) {
+            continue;
+        }
+        if is_dir {
+            if depth >= walk.options.max_depth {
+                *walk.truncated = true;
                 continue;
             }
-            walk_folder(root, &path, depth + 1, entries, truncated)?;
-            if *truncated && entries.len() >= FOLDER_LIST_MAX_ENTRIES {
+            let mut pushed_gitignore = false;
+            if walk.policy.honor_gitignore {
+                if let Some(gi) = load_gitignore_at(&path) {
+                    walk.gitignores.push(gi);
+                    pushed_gitignore = true;
+                }
+            }
+            walk_folder(root, &path, depth + 1, walk)?;
+            if pushed_gitignore {
+                walk.gitignores.pop();
+            }
+            if *walk.truncated && walk.entries.len() >= walk.options.max_entries {
                 return Ok(());
             }
             continue;
@@ -540,7 +804,10 @@ fn walk_folder(
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        entries.push(FolderEntry {
+        if !path_matches_browse_filter(&rel, walk.options.browse_filter.as_deref()) {
+            continue;
+        }
+        walk.entries.push(FolderEntry {
             relative_path: rel,
             size_bytes: meta.len(),
         });
@@ -567,7 +834,7 @@ pub fn folder_attachment_from_selection(
             continue;
         }
         let full = listing.root.join(&entry.relative_path);
-        match read_file_attachment(&full, &listing.root) {
+        match read_file_attachment(&full, None, &listing.root) {
             Ok(file_draft) => {
                 total_bytes = total_bytes.saturating_add(entry.size_bytes);
                 blocks.push(format!(

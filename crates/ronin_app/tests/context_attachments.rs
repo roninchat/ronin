@@ -41,7 +41,7 @@ fn send_message_with_provider_and_attachments_should_persist_and_inject_context(
 
     let mut shell = RoninShell::open(paths.clone()).expect("open shell");
     let thread_id = shell.state().selected_thread_id.clone().expect("thread id");
-    let file = read_file_attachment(&attached_file, temp.path()).expect("file attachment");
+    let file = read_file_attachment(&attached_file, None, temp.path()).expect("file attachment");
     let clipboard = clipboard_attachment("clip body");
     let provider = CapturingProvider::new();
 
@@ -102,7 +102,7 @@ fn send_message_with_provider_and_attachments_should_allow_attachment_only_promp
 
     let mut shell = RoninShell::open(paths.clone()).expect("open shell");
     let thread_id = shell.state().selected_thread_id.clone().expect("thread id");
-    let file = read_file_attachment(&attached_file, temp.path()).expect("file attachment");
+    let file = read_file_attachment(&attached_file, None, temp.path()).expect("file attachment");
     let provider = CapturingProvider::new();
 
     shell
@@ -143,7 +143,7 @@ fn send_message_should_persist_image_and_screenshot_attachment_metadata() {
     let mut shell = RoninShell::open(paths.clone()).expect("open shell");
     let thread_id = shell.state().selected_thread_id.clone().expect("thread id");
 
-    let image = read_file_attachment(&image_path, temp.path()).expect("image");
+    let image = read_file_attachment(&image_path, None, temp.path()).expect("image");
     let captured = FakeScreenshotCapturer::new(shot_path.clone())
         .capture(temp.path())
         .expect("capture");

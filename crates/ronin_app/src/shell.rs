@@ -479,6 +479,103 @@ impl RoninShell {
         Ok(())
     }
 
+    /// Binds an opt-in workspace root to a thread and refreshes sidebar state.
+    ///
+    /// Does not attach files or inject context into the model.
+    pub fn set_thread_workspace_root(
+        &mut self,
+        thread_id: &str,
+        root: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        self.session.set_thread_workspace_root(thread_id, root)?;
+        self.state.threads = self.session.list_threads()?;
+        Ok(())
+    }
+
+    /// Clears the workspace root on a thread and refreshes sidebar state.
+    pub fn clear_thread_workspace_root(&mut self, thread_id: &str) -> Result<()> {
+        self.session.clear_thread_workspace_root(thread_id)?;
+        self.state.threads = self.session.list_threads()?;
+        Ok(())
+    }
+
+    /// Returns the workspace root for a thread from current shell state, if any.
+    pub fn thread_workspace_root(&self, thread_id: &str) -> Option<std::path::PathBuf> {
+        self.state
+            .threads
+            .iter()
+            .find(|t| t.id == thread_id)
+            .and_then(|t| t.workspace_root.clone())
+    }
+
+    /// Folder-list policy from persisted local-knowledge preferences.
+    pub fn folder_list_policy(&self) -> Result<ronin_core::FolderListPolicy> {
+        Ok(self.session.folder_list_policy()?)
+    }
+
+    /// Status for a thread's lexical workspace index.
+    pub fn workspace_index_info(&self, thread_id: &str) -> Result<ronin_core::WorkspaceIndexInfo> {
+        Ok(self.session.workspace_index_info(thread_id)?)
+    }
+
+    /// Explicit one-shot “Index this workspace” build.
+    pub fn build_workspace_index(
+        &mut self,
+        thread_id: &str,
+    ) -> Result<ronin_core::WorkspaceIndexInfo> {
+        Ok(self.session.build_workspace_index(thread_id)?)
+    }
+
+    /// Rebuild lexical workspace index for a thread.
+    pub fn rebuild_workspace_index(
+        &mut self,
+        thread_id: &str,
+    ) -> Result<ronin_core::WorkspaceIndexInfo> {
+        Ok(self.session.rebuild_workspace_index(thread_id)?)
+    }
+
+    /// Request cancel of an in-progress workspace index build.
+    pub fn cancel_workspace_index(&mut self, thread_id: &str) -> Result<()> {
+        Ok(self.session.cancel_workspace_index(thread_id)?)
+    }
+
+    /// Delete workspace index metadata and on-disk corpus.
+    pub fn delete_workspace_index(&mut self, thread_id: &str) -> Result<()> {
+        Ok(self.session.delete_workspace_index(thread_id)?)
+    }
+
+    /// Lexical search over the thread workspace index (candidates only).
+    pub fn search_workspace_index(
+        &self,
+        thread_id: &str,
+        query: &str,
+    ) -> Result<Vec<ronin_core::WorkspaceIndexHit>> {
+        Ok(self.session.search_workspace_index(thread_id, query)?)
+    }
+
+    /// Lexical search with an explicit hit limit.
+    pub fn search_workspace_index_limited(
+        &self,
+        thread_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ronin_core::WorkspaceIndexHit>> {
+        Ok(self
+            .session
+            .search_workspace_index_limited(thread_id, query, limit)?)
+    }
+
+    /// Explicit attach of selected workspace-index hit paths into drafts.
+    pub fn attach_workspace_index_hits<P: AsRef<str>>(
+        &self,
+        thread_id: &str,
+        relative_paths: &[P],
+    ) -> Result<Vec<ronin_core::ContextAttachmentDraft>> {
+        Ok(self
+            .session
+            .attach_workspace_index_hits(thread_id, relative_paths)?)
+    }
+
     /// Lists available models from configured providers (best-effort).
     ///
     /// Returns `(provider_id, model_names)` pairs. Providers that are offline
