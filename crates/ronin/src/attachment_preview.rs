@@ -69,14 +69,16 @@ pub fn preview_from_draft(draft: &ContextAttachmentDraft) -> AttachmentPreview {
                 name: draft.name.clone(),
                 mime_type: draft.mime_type.clone(),
                 size_label: format_size_bytes(draft.size_bytes.unwrap_or(0)),
-                snippet: snippet.or_else(|| {
-                    Some(truncate_chars(&draft.context_block, FILE_SNIPPET_CHARS))
-                }),
+                snippet: snippet
+                    .or_else(|| Some(truncate_chars(&draft.context_block, FILE_SNIPPET_CHARS))),
                 path: draft.path.clone(),
             }
         }
         AttachmentKind::Clipboard | AttachmentKind::Memory | AttachmentKind::Artifact => {
-            let snippet = draft.content.as_ref().map(|c| truncate_chars(c, FILE_SNIPPET_CHARS));
+            let snippet = draft
+                .content
+                .as_ref()
+                .map(|c| truncate_chars(c, FILE_SNIPPET_CHARS));
             AttachmentPreview::Text {
                 name: draft.name.clone(),
                 kind: draft.kind,

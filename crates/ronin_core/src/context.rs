@@ -485,13 +485,7 @@ pub fn list_folder_entries(
 
     let mut entries = Vec::new();
     let mut truncated = false;
-    walk_folder(
-        &resolved,
-        &resolved,
-        0,
-        &mut entries,
-        &mut truncated,
-    )?;
+    walk_folder(&resolved, &resolved, 0, &mut entries, &mut truncated)?;
     entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
     Ok(FolderListing {
@@ -514,9 +508,7 @@ fn walk_folder(
         source,
     })?;
 
-    let mut children: Vec<_> = read
-        .filter_map(|e| e.ok())
-        .collect();
+    let mut children: Vec<_> = read.filter_map(|e| e.ok()).collect();
     children.sort_by_key(|e| e.file_name());
 
     for child in children {

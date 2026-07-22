@@ -22,7 +22,10 @@ fn desktop_file_contents_should_include_freedesktop_required_fields() {
     assert_eq!(fields.icon, APP_ICON_NAME);
     assert_eq!(fields.comment, DESKTOP_COMMENT);
     assert!(fields.categories.iter().any(|c| c == "Utility"));
-    assert!(fields.categories.iter().any(|c| DESKTOP_CATEGORIES.contains(&c.as_str())));
+    assert!(fields
+        .categories
+        .iter()
+        .any(|c| DESKTOP_CATEGORIES.contains(&c.as_str())));
     assert_eq!(fields.r#type, "Application");
     assert!(!fields.terminal);
 
@@ -32,8 +35,8 @@ fn desktop_file_contents_should_include_freedesktop_required_fields() {
 #[test]
 fn packaged_desktop_file_on_disk_should_pass_validation() {
     let path = repo_packaging_dir().join("ronin.desktop");
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     validate_desktop_file(&content).expect("packaged desktop file");
     let fields = parse_desktop_required_fields(&content).expect("fields");
     assert_eq!(fields.name, DESKTOP_NAME);
@@ -46,7 +49,10 @@ fn install_plan_user_prefix_should_use_xdg_data_home_layout() {
     let prefix = Path::new("/home/user/.local");
     let plan = plan_install(prefix, InstallMode::User, Path::new("target/release/ronin"));
 
-    assert_eq!(plan.binary_dest, PathBuf::from("/home/user/.local/bin/ronin"));
+    assert_eq!(
+        plan.binary_dest,
+        PathBuf::from("/home/user/.local/bin/ronin")
+    );
     assert_eq!(
         plan.desktop_dest,
         PathBuf::from("/home/user/.local/share/applications/ronin.desktop")
@@ -95,7 +101,7 @@ fn uninstall_plan_should_list_all_installed_paths() {
     assert!(remove.contains(&plan.desktop_dest));
     assert!(remove.contains(&plan.icon_svg_dest));
     for size in required_icon_sizes() {
-        assert!(remove.contains(plan.icon_png_dests.get(&size).unwrap()));
+        assert!(remove.contains(plan.icon_png_dests.get(size).unwrap()));
     }
 }
 
@@ -105,7 +111,7 @@ fn icon_assets_should_exist_for_required_sizes_and_svg() {
     let assets = icon_asset_paths(&packaging);
     assert!(assets.svg.exists(), "missing {}", assets.svg.display());
     for size in required_icon_sizes() {
-        let path = assets.pngs.get(&size).expect("size mapped");
+        let path = assets.pngs.get(size).expect("size mapped");
         assert!(path.exists(), "missing icon {}", path.display());
         // Validate pixel dimensions via image crate metadata when available.
         let dyn_img = image::image_dimensions(path).expect("read dimensions");

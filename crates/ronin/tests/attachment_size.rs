@@ -6,7 +6,6 @@ use ronin::attachment_size::{
 };
 use ronin::context_indicator::estimate_tokens_from_chars;
 use ronin_core::{clipboard_attachment, AttachmentKind, ContextAttachmentDraft};
-use std::path::PathBuf;
 
 fn draft(kind: AttachmentKind, name: &str, block: &str) -> ContextAttachmentDraft {
     ContextAttachmentDraft {
@@ -37,7 +36,11 @@ fn size_warning_should_sum_all_attachment_kinds() {
     let drafts = vec![
         draft(AttachmentKind::File, "a.txt", &"a".repeat(40)),
         draft(AttachmentKind::Clipboard, "clip", &"b".repeat(40)),
-        draft(AttachmentKind::Image, "pic.png", "[Attached image: pic.png]"),
+        draft(
+            AttachmentKind::Image,
+            "pic.png",
+            "[Attached image: pic.png]",
+        ),
         draft(AttachmentKind::Folder, "src", &"c".repeat(40)),
     ];
     let threshold = 100;
@@ -53,7 +56,9 @@ fn size_warning_should_sum_all_attachment_kinds() {
 fn size_warning_state_should_allow_proceed_or_clear_after_warn() {
     let mut state = AttachmentSizeWarnState::default();
     assert!(!state.should_block_send());
-    let drafts = vec![clipboard_attachment(&"z".repeat(DEFAULT_ATTACHMENT_WARN_CHARS + 10))];
+    let drafts = vec![clipboard_attachment(
+        &"z".repeat(DEFAULT_ATTACHMENT_WARN_CHARS + 10),
+    )];
     state.evaluate(&drafts, DEFAULT_ATTACHMENT_WARN_CHARS);
     assert!(state.warning().is_some());
     assert!(state.should_block_send());
@@ -69,6 +74,7 @@ fn size_warning_state_should_allow_proceed_or_clear_after_warn() {
 
 #[test]
 fn default_warn_threshold_should_be_positive_and_configurable_via_constant() {
-    assert!(DEFAULT_ATTACHMENT_WARN_CHARS >= 8_000);
-    let _ = PathBuf::from("."); // keep imports quiet if unused later
+    const {
+        assert!(DEFAULT_ATTACHMENT_WARN_CHARS >= 8_000);
+    };
 }

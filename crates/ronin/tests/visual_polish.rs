@@ -44,18 +44,9 @@ fn empty_states_should_cover_all_major_surfaces() {
 
     for kind in kinds {
         let content = empty_state(kind);
-        assert!(
-            !content.title.is_empty(),
-            "{kind:?} missing title"
-        );
-        assert!(
-            !content.body.is_empty(),
-            "{kind:?} missing body"
-        );
-        assert!(
-            !content.icon.is_empty(),
-            "{kind:?} missing icon glyph"
-        );
+        assert!(!content.title.is_empty(), "{kind:?} missing title");
+        assert!(!content.body.is_empty(), "{kind:?} missing body");
+        assert!(!content.icon.is_empty(), "{kind:?} missing icon glyph");
         assert!(
             content.action_hint.is_some(),
             "{kind:?} should suggest a next action"
@@ -66,8 +57,14 @@ fn empty_states_should_cover_all_major_surfaces() {
 #[test]
 fn empty_thread_state_should_invite_first_message() {
     let content = empty_state(EmptyStateKind::EmptyThread);
-    assert!(content.title.to_lowercase().contains("conversation") || content.title.to_lowercase().contains("chat"));
-    assert!(content.body.to_lowercase().contains("message") || content.body.to_lowercase().contains("ask"));
+    assert!(
+        content.title.to_lowercase().contains("conversation")
+            || content.title.to_lowercase().contains("chat")
+    );
+    assert!(
+        content.body.to_lowercase().contains("message")
+            || content.body.to_lowercase().contains("ask")
+    );
 }
 
 #[test]
@@ -110,7 +107,10 @@ fn stream_failure_error_should_mention_retry() {
 #[test]
 fn streaming_motion_should_use_smooth_cursor_duty_cycle() {
     let motion = streaming_motion();
-    assert!(motion.cursor_cycle_ms >= 700, "longer cycle reduces flicker");
+    assert!(
+        motion.cursor_cycle_ms >= 700,
+        "longer cycle reduces flicker"
+    );
     assert!(motion.cursor_visible_ms < motion.cursor_cycle_ms);
     let duty = motion.cursor_visible_ms as f32 / motion.cursor_cycle_ms as f32;
     assert!(

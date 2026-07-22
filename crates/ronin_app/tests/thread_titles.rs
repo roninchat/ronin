@@ -44,11 +44,7 @@ fn sanitize_generated_title_should_strip_quotes_and_fluff() {
 
 #[test]
 fn title_generation_request_should_be_lightweight() {
-    let req = build_title_generation_request(
-        "test-model",
-        &"u".repeat(2_000),
-        &"a".repeat(2_000),
-    );
+    let req = build_title_generation_request("test-model", &"u".repeat(2_000), &"a".repeat(2_000));
     assert_eq!(req.model, "test-model");
     let total: usize = req.messages.iter().map(|m| m.content.len()).sum();
     assert!(
@@ -181,10 +177,7 @@ fn apply_model_title_should_replace_provisional_when_allowed() {
     shell
         .send_message(&thread_id, "How do I install Rust?")
         .expect("send");
-    assert_eq!(
-        shell.state().threads[0].title,
-        "How do I install Rust?"
-    );
+    assert_eq!(shell.state().threads[0].title, "How do I install Rust?");
 
     // Simulate completed first exchange messages already present from send_message
     // (user only). Create assistant reply so exchange exists.

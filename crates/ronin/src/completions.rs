@@ -288,10 +288,7 @@ mod tests {
     #[test]
     fn artifact_completion_prefix_should_extract_typed_prefix() {
         let text = "use @artifact:ref";
-        assert_eq!(
-            artifact_completion_prefix(text, text.len()),
-            Some("ref")
-        );
+        assert_eq!(artifact_completion_prefix(text, text.len()), Some("ref"));
     }
 
     #[test]

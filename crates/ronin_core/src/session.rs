@@ -165,13 +165,7 @@ impl RoninSession {
         };
         let message = self
             .db
-            .create_message_with_parent(
-                thread_id,
-                db_role,
-                content,
-                "complete",
-                parent_id,
-            )
+            .create_message_with_parent(thread_id, db_role, content, "complete", parent_id)
             .map(Message::from)?;
         self.db
             .set_thread_active_leaf(thread_id, Some(&message.id))?;
@@ -193,13 +187,7 @@ impl RoninSession {
     ) -> Result<Message> {
         let message = self
             .db
-            .create_message_with_parent(
-                thread_id,
-                "assistant",
-                content,
-                "streaming",
-                parent_id,
-            )
+            .create_message_with_parent(thread_id, "assistant", content, "streaming", parent_id)
             .map(Message::from)?;
         self.db
             .set_thread_active_leaf(thread_id, Some(&message.id))?;
@@ -326,13 +314,12 @@ impl RoninSession {
     /// Exports non-secret provider settings to a TOML file.
     pub fn export_provider_config_to_file(&self, path: &std::path::Path) -> Result<()> {
         let config = self.load_config()?;
-        let data = crate::config::export_provider_config_toml(&config)
-            .map_err(RoninError::Config)?;
+        let data =
+            crate::config::export_provider_config_toml(&config).map_err(RoninError::Config)?;
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent).map_err(|e| {
-                    RoninError::Config(format!("create export directory: {e}"))
-                })?;
+                fs::create_dir_all(parent)
+                    .map_err(|e| RoninError::Config(format!("create export directory: {e}")))?;
             }
         }
         fs::write(path, data).map_err(|e| RoninError::Config(format!("write export file: {e}")))?;

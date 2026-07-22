@@ -48,7 +48,8 @@ pub fn format_provider_error(provider: &str, raw: &str) -> String {
             && (lower.contains("model") || provider == "ollama" || provider == "openai"))
     {
         return if provider == "ollama" {
-            "Model not found. Check the model name, or pull it with `ollama pull <model>`.".to_string()
+            "Model not found. Check the model name, or pull it with `ollama pull <model>`."
+                .to_string()
         } else {
             "Model not found. Check the model name in provider settings, or pick an available model.".to_string()
         };

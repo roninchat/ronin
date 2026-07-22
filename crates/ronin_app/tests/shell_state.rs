@@ -416,7 +416,9 @@ fn shell_should_store_connection_test_result_on_state() {
             OllamaHealth::Offline
         }
         fn list_models(&self) -> Result<Vec<String>, ronin_core::RoninError> {
-            Err(ronin_core::RoninError::Provider("connection refused".into()))
+            Err(ronin_core::RoninError::Provider(
+                "connection refused".into(),
+            ))
         }
     }
 

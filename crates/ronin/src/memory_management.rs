@@ -184,9 +184,7 @@ fn unix_secs_to_ymd(secs: i64) -> (i32, u32, u32) {
 }
 
 /// Groups cards with Profile section first, then Regular.
-pub fn group_memory_cards(
-    items: &[MemoryListItem],
-) -> Vec<(MemoryGroup, Vec<MemoryPreviewCard>)> {
+pub fn group_memory_cards(items: &[MemoryListItem]) -> Vec<(MemoryGroup, Vec<MemoryPreviewCard>)> {
     let order = [MemoryGroup::Profile, MemoryGroup::Regular];
     let mut out = Vec::new();
     for group in order {

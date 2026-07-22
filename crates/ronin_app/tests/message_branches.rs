@@ -1,8 +1,6 @@
 //! Public seams for conversation branch path resolution and navigation.
 
-use ronin_app::{
-    leaf_under_root, resolve_active_path, sibling_branch_nav, BranchNav, MessageNode,
-};
+use ronin_app::{leaf_under_root, resolve_active_path, sibling_branch_nav, BranchNav, MessageNode};
 
 fn nodes(pairs: &[(&str, Option<&str>)]) -> Vec<MessageNode> {
     pairs

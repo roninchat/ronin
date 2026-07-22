@@ -68,13 +68,10 @@ fn highlight_should_support_required_languages() {
 
     for (lang, code) in samples {
         let lines = highlight_code(Some(lang), code, ColorScheme::Dark);
-        assert!(
-            !lines.is_empty(),
-            "language {lang} produced no lines"
-        );
-        let has_non_default = lines.iter().any(|line| {
-            line.spans.iter().any(|span| span.rgb != (0xcd, 0xd6, 0xf4))
-        });
+        assert!(!lines.is_empty(), "language {lang} produced no lines");
+        let has_non_default = lines
+            .iter()
+            .any(|line| line.spans.iter().any(|span| span.rgb != (0xcd, 0xd6, 0xf4)));
         // Most languages should produce at least some non-default coloring;
         // markdown headings / simple cases may be subtle — require tokenization
         // OR reconstructed text equality as a minimum correctness check.

@@ -37,7 +37,10 @@ pub struct ArtifactPreviewCard {
 }
 
 /// Builds a preview card from an artifact and its source thread title.
-pub fn artifact_preview_card(artifact: &Artifact, source_thread_title: &str) -> ArtifactPreviewCard {
+pub fn artifact_preview_card(
+    artifact: &Artifact,
+    source_thread_title: &str,
+) -> ArtifactPreviewCard {
     let kind = if artifact.is_snippet() {
         SNIPPET_KIND_BADGE
     } else {

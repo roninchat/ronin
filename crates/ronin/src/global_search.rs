@@ -213,7 +213,9 @@ pub fn matches_filters(doc: &SearchDocument, filters: &SearchFilters) -> bool {
 }
 
 fn contains_ci(haystack: &str, needle: &str) -> bool {
-    haystack.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
+    haystack
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
 }
 
 fn snippet_around(text: &str, needle: &str) -> String {

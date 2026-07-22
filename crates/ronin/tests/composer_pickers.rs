@@ -78,7 +78,10 @@ fn slash_picker_should_filter_as_user_types() {
     assert_eq!(picker.query, "ne");
     assert_eq!(picker.items.len(), 1);
     assert_eq!(picker.items[0].insert, "/new");
-    assert_eq!(picker.items[0].slash_kind(), Some(SlashActionKind::NewThread));
+    assert_eq!(
+        picker.items[0].slash_kind(),
+        Some(SlashActionKind::NewThread)
+    );
 }
 
 #[test]

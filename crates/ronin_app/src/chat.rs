@@ -137,9 +137,7 @@ pub fn build_title_generation_request(
 }
 
 /// Joins streamed title-generation chunks into a raw response string.
-pub fn collect_streamed_title(
-    events: impl IntoIterator<Item = ChatStreamEvent>,
-) -> String {
+pub fn collect_streamed_title(events: impl IntoIterator<Item = ChatStreamEvent>) -> String {
     let mut out = String::new();
     for event in events {
         match event {
@@ -177,11 +175,7 @@ pub fn sanitize_generated_title(raw: &str) -> Option<String> {
 /// Allows replacement while the title is still the default `New Chat` or the
 /// provisional first-line derive from `first_user_message`. Manual renames and
 /// already-custom titles are left alone.
-pub fn may_apply_auto_title(
-    current_title: &str,
-    first_user_message: &str,
-    manual: bool,
-) -> bool {
+pub fn may_apply_auto_title(current_title: &str, first_user_message: &str, manual: bool) -> bool {
     if manual {
         return false;
     }

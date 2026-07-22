@@ -49,9 +49,7 @@ impl MessageEditState {
 
 /// Commits a non-empty trimmed draft and clears editing state.
 pub fn edit_draft_commit(state: &mut MessageEditState) -> Option<MessageEditDraft> {
-    let Some(editing) = state.editing.as_ref() else {
-        return None;
-    };
+    let editing = state.editing.as_ref()?;
     let trimmed = editing.draft.trim().to_string();
     if trimmed.is_empty() {
         return None;

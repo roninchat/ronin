@@ -1,8 +1,6 @@
 //! Persona / system-prompt customization.
 
-use ronin_core::{
-    effective_system_prompt, PersonaConfig, PersonaMode, RONIN_SYSTEM_PROMPT,
-};
+use ronin_core::{effective_system_prompt, PersonaConfig, PersonaMode, RONIN_SYSTEM_PROMPT};
 
 #[test]
 fn effective_system_prompt_should_default_to_built_in_ronin_prompt() {
@@ -98,4 +96,3 @@ fn persona_config_should_persist_across_session_reload() {
         format!("{RONIN_SYSTEM_PROMPT}\n\nPrefer British spelling.")
     );
 }
-

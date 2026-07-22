@@ -81,7 +81,7 @@ pub fn format_token_count(tokens: usize) -> String {
         tokens.to_string()
     } else if tokens < 10_000 {
         let tenths = (tokens + 50) / 100;
-        if tenths % 10 == 0 {
+        if tenths.is_multiple_of(10) {
             format!("{}k", tenths / 10)
         } else {
             format!("{}.{}k", tenths / 10, tenths % 10)
@@ -162,9 +162,7 @@ pub fn fill_level_color(level: ContextFillLevel, scheme: ColorScheme) -> Hsla {
         (ContextFillLevel::Elevated, ColorScheme::Dark) => {
             gpui::hsla(45. / 360., 0.70, 0.65, 1.0) // amber
         }
-        (ContextFillLevel::Elevated, ColorScheme::Light) => {
-            gpui::hsla(40. / 360., 0.75, 0.42, 1.0)
-        }
+        (ContextFillLevel::Elevated, ColorScheme::Light) => gpui::hsla(40. / 360., 0.75, 0.42, 1.0),
         (ContextFillLevel::Critical, ColorScheme::Dark) => {
             gpui::hsla(350. / 360., 0.65, 0.70, 1.0) // rose / red
         }
@@ -221,9 +219,7 @@ pub fn project_context_indicator(input: ContextEstimateInput<'_>) -> ContextIndi
     let used_chars = system_chars + history_and_pending_chars;
     let estimated_tokens = estimate_tokens_from_chars(used_chars);
 
-    let limit_tokens = input
-        .model_name
-        .and_then(resolve_model_context_window);
+    let limit_tokens = input.model_name.and_then(resolve_model_context_window);
     let app_limit_tokens = estimate_tokens_from_chars(input.max_chars + system_chars);
     let display_limit_tokens = limit_tokens.unwrap_or(app_limit_tokens);
     let limit_chars = display_limit_tokens.saturating_mul(4).max(1);

@@ -10,6 +10,7 @@
 //! - [`screenshot`]: screenshot capture abstraction (portal / fallback).
 //! - [`providers`]: Ronin-owned provider traits and HTTP adapters.
 //! - [`session`]: filesystem/database-backed application session.
+//! - [`trust`]: host-enforced capability boundary and silent-context gates.
 
 pub mod config;
 pub mod context;
@@ -18,13 +19,14 @@ pub mod error;
 pub mod providers;
 pub mod screenshot;
 pub mod session;
+pub mod trust;
 
 pub use config::{
     clamp_sidebar_width, effective_sidebar_width, export_provider_config_toml,
-    import_provider_config_toml, resolve_color_scheme, validate_provider_config_export, ColorScheme,
-    GeneralConfig, LoggingConfig, OllamaConfig, OpenAiConfig, PersonaConfig, PersonaMode,
-    ProviderConfigExport, RoninConfig, ThemePreference, UiConfig, SIDEBAR_WIDTH_DEFAULT,
-    SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
+    import_provider_config_toml, resolve_color_scheme, validate_provider_config_export,
+    ColorScheme, GeneralConfig, LoggingConfig, OllamaConfig, OpenAiConfig, PersonaConfig,
+    PersonaMode, ProviderConfigExport, RoninConfig, ThemePreference, UiConfig,
+    SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
 pub use context::{
     artifact_attachment, attachment_content_chars, clipboard_attachment,
@@ -47,3 +49,7 @@ pub use providers::{
 };
 pub use screenshot::{FakeScreenshotCapturer, ScreenshotCapturer, ScreenshotError};
 pub use session::RoninSession;
+pub use trust::{
+    may_auto_execute, may_inject_into_chat_request, resolve_marker_tool, scrub_ambient_payload,
+    AllowedTool, ContextOrigin, ToolDisposition, AMBIENT_REDACTED, FORBIDDEN_AGENCY_TOOL_NAMES,
+};

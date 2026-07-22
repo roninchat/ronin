@@ -141,27 +141,35 @@ fn filters_should_narrow_by_provider_model_date_and_kind() {
         },
     ];
 
-    let mut filters = SearchFilters::default();
-    filters.provider = Some("ollama".into());
+    let filters = SearchFilters {
+        provider: Some("ollama".into()),
+        ..Default::default()
+    };
     let hits = search("needle", &docs, &filters);
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].document.id, "t1");
 
-    filters = SearchFilters::default();
-    filters.model = Some("gpt-4o".into());
+    let filters = SearchFilters {
+        model: Some("gpt-4o".into()),
+        ..Default::default()
+    };
     let hits = search("needle", &docs, &filters);
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].document.id, "t2");
 
-    filters = SearchFilters::default();
-    filters.created_after_ms = Some(2_000);
-    filters.created_before_ms = Some(4_000);
+    let filters = SearchFilters {
+        created_after_ms: Some(2_000),
+        created_before_ms: Some(4_000),
+        ..Default::default()
+    };
     let hits = search("needle", &docs, &filters);
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].document.id, "m1");
 
-    filters = SearchFilters::default();
-    filters.kinds = vec![SearchContentKind::Memory];
+    let filters = SearchFilters {
+        kinds: vec![SearchContentKind::Memory],
+        ..Default::default()
+    };
     let hits = search("needle", &docs, &filters);
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].document.kind, SearchContentKind::Memory);
@@ -195,7 +203,13 @@ fn search_panel_state_should_toggle_and_track_query() {
 #[test]
 fn title_matches_should_rank_above_body_only_matches() {
     let docs = vec![
-        doc(SearchContentKind::Thread, "body", "Other", "zzz rust zzz", 1),
+        doc(
+            SearchContentKind::Thread,
+            "body",
+            "Other",
+            "zzz rust zzz",
+            1,
+        ),
         doc(SearchContentKind::Thread, "title", "Rust guide", "hello", 2),
     ];
     let hits = search("rust", &docs, &SearchFilters::default());
@@ -231,10 +245,7 @@ fn date_preset_should_set_created_after_bounds() {
     let now = 1_000_000_000_i64;
     panel.set_date_preset(SearchDatePreset::Last7Days, now);
     assert_eq!(panel.date_preset(), SearchDatePreset::Last7Days);
-    assert_eq!(
-        panel.filters().created_after_ms,
-        Some(now - 7 * 86_400_000)
-    );
+    assert_eq!(panel.filters().created_after_ms, Some(now - 7 * 86_400_000));
     panel.set_date_preset(SearchDatePreset::Any, now);
     assert!(panel.filters().created_after_ms.is_none());
 }

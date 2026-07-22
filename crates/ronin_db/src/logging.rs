@@ -64,7 +64,14 @@ fn redact_userinfo_urls(input: &str) -> String {
 }
 
 fn redact_query_secrets(input: &str) -> String {
-    let keys = ["api_key=", "token=", "key=", "secret=", "password=", "access_token="];
+    let keys = [
+        "api_key=",
+        "token=",
+        "key=",
+        "secret=",
+        "password=",
+        "access_token=",
+    ];
     let mut out = input.to_string();
     for key in keys {
         out = redact_after_key(&out, key);
@@ -86,7 +93,9 @@ fn redact_after_key(input: &str, key: &str) -> String {
         out.push_str(&rest[idx..idx + key.len()]);
         let after = &rest[idx + key.len()..];
         let end = after
-            .find(|c: char| c.is_whitespace() || c == '&' || c == '"' || c == '\'' || c == '`' || c == ',')
+            .find(|c: char| {
+                c.is_whitespace() || c == '&' || c == '"' || c == '\'' || c == '`' || c == ','
+            })
             .unwrap_or(after.len());
         if end > 0 {
             out.push_str(REDACTED_PLACEHOLDER);
@@ -178,14 +187,14 @@ fn redact_field_value(input: &str, key: &str) -> String {
         out.push_str(&rest[..idx]);
         out.push_str(&rest[idx..idx + key.len()]);
         let after = &rest[idx + key.len()..];
-        let (redacted_len, skip) = if after.starts_with('"') {
-            if let Some(end) = after[1..].find('"') {
+        let (redacted_len, skip) = if let Some(inner) = after.strip_prefix('"') {
+            if let Some(end) = inner.find('"') {
                 (end + 2, end + 2)
             } else {
                 (after.len(), after.len())
             }
-        } else if after.starts_with('\'') {
-            if let Some(end) = after[1..].find('\'') {
+        } else if let Some(inner) = after.strip_prefix('\'') {
+            if let Some(end) = inner.find('\'') {
                 (end + 2, end + 2)
             } else {
                 (after.len(), after.len())
@@ -307,7 +316,7 @@ impl RotatingLogWriter {
         let mut guard = self.file.lock().unwrap_or_else(|e| e.into_inner());
         let file = guard
             .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "log file closed"))?;
+            .ok_or_else(|| io::Error::other("log file closed"))?;
         let meta = file.metadata()?;
         if meta.len() + buf.len() as u64 > self.max_file_bytes {
             self.rotate_locked(&mut guard)?;

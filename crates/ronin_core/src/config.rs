@@ -47,10 +47,7 @@ pub enum ColorScheme {
 }
 
 /// Resolves a theme preference against the desktop color scheme.
-pub fn resolve_color_scheme(
-    preference: ThemePreference,
-    system: ColorScheme,
-) -> ColorScheme {
+pub fn resolve_color_scheme(preference: ThemePreference, system: ColorScheme) -> ColorScheme {
     match preference {
         ThemePreference::Light => ColorScheme::Light,
         ThemePreference::Dark => ColorScheme::Dark,
@@ -254,7 +251,7 @@ pub fn validate_provider_config_export(bundle: &ProviderConfigExport) -> Result<
         if let Some(url) = &openai.base_url {
             if url.trim().is_empty() {
                 return Err(
-                    "invalid provider config: openai.base_url must not be empty".to_string(),
+                    "invalid provider config: openai.base_url must not be empty".to_string()
                 );
             }
         }

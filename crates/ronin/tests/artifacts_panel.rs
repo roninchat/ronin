@@ -60,18 +60,12 @@ fn preview_card_snippet_should_truncate_long_content() {
 
     assert_eq!(card.snippet.chars().count(), ARTIFACT_SNIPPET_CHARS + 1); // + ellipsis
     assert!(card.snippet.ends_with('…'));
-    assert_eq!(
-        content_snippet(&long, ARTIFACT_SNIPPET_CHARS),
-        card.snippet
-    );
+    assert_eq!(content_snippet(&long, ARTIFACT_SNIPPET_CHARS), card.snippet);
 }
 
 #[test]
 fn empty_state_should_be_clear_when_no_artifacts() {
-    assert_eq!(
-        artifacts_empty_state(&[]),
-        Some(ARTIFACTS_EMPTY_STATE)
-    );
+    assert_eq!(artifacts_empty_state(&[]), Some(ARTIFACTS_EMPTY_STATE));
     assert!(ARTIFACTS_EMPTY_STATE.contains("No artifacts"));
 }
 
@@ -152,7 +146,11 @@ fn document_preview_card_should_keep_generic_artifact_badge() {
 fn snippet_artifact_should_highlight_with_language_metadata() {
     let artifact = sample_snippet("main", "fn main() { let x = 1; }", "rust");
     assert!(artifact.is_snippet());
-    let lines = highlight_code(artifact.language.as_deref(), &artifact.content, ColorScheme::Dark);
+    let lines = highlight_code(
+        artifact.language.as_deref(),
+        &artifact.content,
+        ColorScheme::Dark,
+    );
     assert!(!lines.is_empty());
     // Syntect should produce more than a single plain span for Rust keywords.
     let span_count: usize = lines.iter().map(|l| l.spans.len()).sum();

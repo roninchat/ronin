@@ -195,11 +195,7 @@ impl KeyboardNavState {
         }
     }
 
-    fn handle_sidebar_key(
-        &mut self,
-        key: KeyInput<'_>,
-        thread_count: usize,
-    ) -> (bool, NavAction) {
+    fn handle_sidebar_key(&mut self, key: KeyInput<'_>, thread_count: usize) -> (bool, NavAction) {
         if key.control {
             return (false, NavAction::None);
         }
@@ -233,11 +229,7 @@ impl KeyboardNavState {
         }
     }
 
-    fn handle_messages_key(
-        &mut self,
-        key: KeyInput<'_>,
-        thread_count: usize,
-    ) -> (bool, NavAction) {
+    fn handle_messages_key(&mut self, key: KeyInput<'_>, thread_count: usize) -> (bool, NavAction) {
         if key.control {
             return (false, NavAction::None);
         }
@@ -252,11 +244,7 @@ impl KeyboardNavState {
         }
     }
 
-    fn handle_composer_key(
-        &mut self,
-        key: KeyInput<'_>,
-        thread_count: usize,
-    ) -> (bool, NavAction) {
+    fn handle_composer_key(&mut self, key: KeyInput<'_>, thread_count: usize) -> (bool, NavAction) {
         if key.control {
             return (false, NavAction::None);
         }

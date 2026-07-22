@@ -54,7 +54,14 @@ fn disabled_card_should_show_disabled_status() {
 
 #[test]
 fn profile_memories_should_be_visually_distinguished() {
-    let mem = item("p1", "Role", "Staff engineer", true, MemoryGroup::Profile, 1);
+    let mem = item(
+        "p1",
+        "Role",
+        "Staff engineer",
+        true,
+        MemoryGroup::Profile,
+        1,
+    );
     let card = memory_preview_card(&mem);
     assert_eq!(card.group, MemoryGroup::Profile);
     assert_eq!(card.group_label, PROFILE_GROUP_LABEL);
@@ -132,14 +139,7 @@ fn indicator_should_report_active_count_and_titles() {
 
 #[test]
 fn indicator_should_be_none_when_no_active_memories() {
-    let items = vec![item(
-        "p",
-        "Off",
-        "x",
-        false,
-        MemoryGroup::Profile,
-        1,
-    )];
+    let items = vec![item("p", "Off", "x", false, MemoryGroup::Profile, 1)];
     assert!(memory_context_indicator(&items).is_none());
 }
 

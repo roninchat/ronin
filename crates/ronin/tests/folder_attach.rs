@@ -1,8 +1,6 @@
 //! Folder attach: listing, file selection, and draft conversion.
 
-use ronin::folder_attach::{
-    folder_attach_from_listing, FolderAttachState,
-};
+use ronin::folder_attach::{folder_attach_from_listing, FolderAttachState};
 use ronin_core::{list_folder_entries, AttachmentKind};
 use tempfile::TempDir;
 

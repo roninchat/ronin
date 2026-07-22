@@ -48,9 +48,7 @@ impl ThreadRenameState {
 
     /// Commits the draft when non-empty after trim; leaves editing active on failure.
     pub fn commit(&mut self) -> Option<ThreadRenameDraft> {
-        let Some(editing) = self.editing.as_ref() else {
-            return None;
-        };
+        let editing = self.editing.as_ref()?;
         let trimmed = editing.draft.trim().to_string();
         if trimmed.is_empty() {
             return None;

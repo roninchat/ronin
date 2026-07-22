@@ -3,9 +3,9 @@
 use std::sync::mpsc;
 
 use ronin_core::{
-    ChatProvider, ChatStreamEvent, ContextAttachmentDraft, HttpOllamaProvider, Message, MessageRole,
-    MessageStatus, OllamaProvider, OpenAiCompatibleProvider, RoninError, RoninPaths, RoninSession,
-    Thread,
+    ChatProvider, ChatStreamEvent, ContextAttachmentDraft, HttpOllamaProvider, Message,
+    MessageRole, MessageStatus, OllamaProvider, OpenAiCompatibleProvider, RoninError, RoninPaths,
+    RoninSession, Thread,
 };
 
 use crate::branches::{leaf_under_root, sibling_branch_nav, MessageNode};
@@ -18,7 +18,7 @@ use crate::status::{
     format_provider_error, probe_provider_status, run_connection_test, ConnectionTestResult,
     ProviderStatus,
 };
-use crate::tools::{execute_tool_call, parse_unexecuted_tool_call};
+use crate::tools::next_tool_result;
 
 /// M0 design checkpoint values shown to reviewers before deeper UI work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,7 +431,12 @@ impl RoninShell {
             }
         }
         let _ = self.refresh_provider_status();
-        tracing::info!(thread_id, provider, model, "ronin shell selected thread model");
+        tracing::info!(
+            thread_id,
+            provider,
+            model,
+            "ronin shell selected thread model"
+        );
         Ok(())
     }
 
@@ -1272,11 +1277,9 @@ impl RoninShell {
             .clone()
             .unwrap_or_else(|| user.id.clone());
 
-        let assistant_msg = self.session.create_streaming_message_with_parent(
-            thread_id,
-            "",
-            Some(&parent_id),
-        )?;
+        let assistant_msg =
+            self.session
+                .create_streaming_message_with_parent(thread_id, "", Some(&parent_id))?;
         self.spawn_streaming(thread_id, &assistant_msg.id, provider, model, &[])?;
         Ok(())
     }
@@ -1501,9 +1504,8 @@ impl RoninShell {
             }
 
             if loop_count < MAX_TOOL_LOOPS {
-                if let Some(tool_call) = parse_unexecuted_tool_call(&accumulated) {
+                if let Some(tool_result) = next_tool_result(&self.session, &accumulated) {
                     loop_count += 1;
-                    let tool_result = execute_tool_call(&self.session, &tool_call);
 
                     self.session
                         .create_message(thread_id, MessageRole::System, &tool_result)?;
@@ -1551,11 +1553,7 @@ impl RoninShell {
     }
 
     /// Creates a profile-group memory (auto-injected when enabled).
-    pub fn create_profile_memory(
-        &self,
-        title: &str,
-        content: &str,
-    ) -> Result<ronin_core::Memory> {
+    pub fn create_profile_memory(&self, title: &str, content: &str) -> Result<ronin_core::Memory> {
         self.session
             .create_profile_memory(title, content)
             .map_err(Into::into)
@@ -1567,22 +1565,14 @@ impl RoninShell {
     }
 
     /// Sets whether a memory is enabled for provider context.
-    pub fn set_memory_enabled(
-        &self,
-        id: &ronin_core::MemoryId,
-        enabled: bool,
-    ) -> Result<()> {
+    pub fn set_memory_enabled(&self, id: &ronin_core::MemoryId, enabled: bool) -> Result<()> {
         self.session
             .set_memory_enabled(id, enabled)
             .map_err(Into::into)
     }
 
     /// Sets whether a memory belongs to the user profile group.
-    pub fn set_memory_profile(
-        &self,
-        id: &ronin_core::MemoryId,
-        is_profile: bool,
-    ) -> Result<()> {
+    pub fn set_memory_profile(&self, id: &ronin_core::MemoryId, is_profile: bool) -> Result<()> {
         self.session
             .set_memory_profile(id, is_profile)
             .map_err(Into::into)
@@ -1715,9 +1705,8 @@ fn run_streaming_turns(
         let _ = session.complete_message(&assistant_msg_id, &accumulated);
 
         if loop_count < MAX_TOOL_LOOPS {
-            if let Some(tool_call) = parse_unexecuted_tool_call(&accumulated) {
+            if let Some(tool_result) = next_tool_result(session, &accumulated) {
                 loop_count += 1;
-                let tool_result = execute_tool_call(session, &tool_call);
 
                 if let Err(e) = session.create_message(thread_id, MessageRole::System, &tool_result)
                 {

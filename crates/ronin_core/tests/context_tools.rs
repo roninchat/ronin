@@ -190,10 +190,7 @@ fn read_file_attachment_should_accept_supported_image_extensions() {
 #[test]
 fn parse_context_tools_should_recognize_folder_ref() {
     let parsed = parse_context_tools("see @folder:src/lib then ask");
-    assert_eq!(
-        parsed.refs,
-        vec![ContextToolRef::Folder("src/lib".into())]
-    );
+    assert_eq!(parsed.refs, vec![ContextToolRef::Folder("src/lib".into())]);
     assert_eq!(parsed.visible_message, "see then ask");
 }
 
@@ -213,17 +210,19 @@ fn list_folder_entries_should_list_files_and_allow_selection_to_draft() {
     let listing = list_folder_entries(&root, temp.path()).expect("list");
     assert_eq!(listing.name, "proj");
     assert!(!listing.truncated);
-    let rels: Vec<_> = listing.entries.iter().map(|e| e.relative_path.as_str()).collect();
+    let rels: Vec<_> = listing
+        .entries
+        .iter()
+        .map(|e| e.relative_path.as_str())
+        .collect();
     assert!(rels.contains(&"README.md"));
     assert!(rels.contains(&"src/main.rs"));
     assert!(rels.contains(&"src/lib.rs"));
     assert!(listing.entries.len() <= FOLDER_LIST_MAX_ENTRIES);
 
-    let draft = folder_attachment_from_selection(
-        &listing,
-        &["README.md".into(), "src/main.rs".into()],
-    )
-    .expect("draft");
+    let draft =
+        folder_attachment_from_selection(&listing, &["README.md".into(), "src/main.rs".into()])
+            .expect("draft");
     assert_eq!(draft.kind, AttachmentKind::Folder);
     assert!(draft.context_block.contains("README.md"));
     assert!(draft.context_block.contains("# hi"));
@@ -262,6 +261,10 @@ fn list_folder_entries_should_bound_deep_listings() {
     assert!(
         !has_too_deep,
         "entries should stay within max depth; got {:?}",
-        listing.entries.iter().map(|e| &e.relative_path).collect::<Vec<_>>()
+        listing
+            .entries
+            .iter()
+            .map(|e| &e.relative_path)
+            .collect::<Vec<_>>()
     );
 }

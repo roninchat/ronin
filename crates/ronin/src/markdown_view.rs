@@ -94,16 +94,10 @@ pub fn render_highlighted_code_lines(
 }
 
 fn render_highlighted_lines(lines: &[HighlightedLine]) -> Div {
-    let mut code_lines = div()
-        .w_full()
-        .font_family("Courier New")
-        .flex()
-        .flex_col();
+    let mut code_lines = div().w_full().font_family("Courier New").flex().flex_col();
     for line in lines {
         let mut row = div().flex().flex_row().flex_wrap();
-        if line.spans.is_empty()
-            || (line.spans.len() == 1 && line.spans[0].text.is_empty())
-        {
+        if line.spans.is_empty() || (line.spans.len() == 1 && line.spans[0].text.is_empty()) {
             row = row.child(div().child(" "));
         } else {
             for span in &line.spans {

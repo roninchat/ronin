@@ -97,8 +97,7 @@ impl InstallPlan {
             self.icon_svg_dest.display()
         ));
         for size in required_icon_sizes() {
-            if let (Some(src), Some(dest)) =
-                (assets.pngs.get(size), self.icon_png_dests.get(size))
+            if let (Some(src), Some(dest)) = (assets.pngs.get(size), self.icon_png_dests.get(size))
             {
                 ops.push(format!("install -D {} {}", src.display(), dest.display()));
             }
@@ -129,9 +128,7 @@ StartupNotify=true
 }
 
 /// Parses required freedesktop fields from desktop file text.
-pub fn parse_desktop_required_fields(
-    content: &str,
-) -> Result<DesktopRequiredFields, String> {
+pub fn parse_desktop_required_fields(content: &str) -> Result<DesktopRequiredFields, String> {
     let mut r#type = None;
     let mut name = None;
     let mut exec = None;
