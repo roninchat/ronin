@@ -186,6 +186,40 @@ impl Default for LoggingConfig {
     }
 }
 
+/// Desktop notification preferences from `config.toml`.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct NotificationsConfig {
+    /// When false, generation-done / generation-failed notifications are not requested.
+    #[serde(default = "default_notifications_enabled")]
+    pub enabled: bool,
+}
+
+fn default_notifications_enabled() -> bool {
+    true
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_notifications_enabled(),
+        }
+    }
+}
+
+/// Local-knowledge privacy preferences for folder listing / indexing.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct LocalKnowledgeConfig {
+    /// Absolute paths that must never be listed or indexed.
+    #[serde(default)]
+    pub never_list: Vec<String>,
+    /// When true, only [`Self::allowlist`] roots are eligible for listing/indexing.
+    #[serde(default)]
+    pub allowlist_enabled: bool,
+    /// Approved roots when allowlist mode is enabled.
+    #[serde(default)]
+    pub allowlist: Vec<String>,
+}
+
 /// The root configuration object loaded from config.toml.
 #[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone)]
 pub struct RoninConfig {
@@ -209,6 +243,12 @@ pub struct RoninConfig {
     /// Persistent file logging preferences.
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Desktop notification preferences.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+    /// Folder listing / local-knowledge privacy controls.
+    #[serde(default)]
+    pub local_knowledge: LocalKnowledgeConfig,
 }
 
 /// Portable provider settings for import/export (never includes secrets).

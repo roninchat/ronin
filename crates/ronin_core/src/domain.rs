@@ -32,6 +32,8 @@ pub struct Thread {
     pub model: Option<String>,
     /// Tip of the currently viewed conversation branch, if set.
     pub active_leaf_id: Option<String>,
+    /// Absolute path bound as this thread's opt-in workspace root, if any.
+    pub workspace_root: Option<PathBuf>,
 }
 
 /// Role of a chat message.
@@ -191,6 +193,7 @@ impl From<DbThread> for Thread {
             provider: thread.provider,
             model: thread.model,
             active_leaf_id: thread.active_leaf_id,
+            workspace_root: thread.workspace_root.map(PathBuf::from),
         }
     }
 }
