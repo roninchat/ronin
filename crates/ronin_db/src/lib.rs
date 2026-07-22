@@ -3,10 +3,14 @@
 //! SQLite persistence for Ronin.
 
 mod logging;
+mod workspace_index;
 
 pub use logging::{
     default_log_dir, redact_log_text, FileLogOptions, RotatingLogWriter,
     DEFAULT_MAX_LOG_FILE_BYTES, REDACTED_PLACEHOLDER,
+};
+pub use workspace_index::{
+    delete_workspace_lexical_store, LexicalIndexDocument, WorkspaceLexicalStore,
 };
 
 use std::path::{Path, PathBuf};
@@ -40,6 +44,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         6,
         include_str!("../migrations/0006_thread_workspace_root.sql"),
     ),
+    (7, include_str!("../migrations/0007_workspace_indexes.sql")),
 ];
 
 /// Result type returned by `ronin_db` operations.
@@ -212,6 +217,50 @@ pub enum RoninDbError {
     /// An attachment could not be deleted.
     #[error("failed to delete attachment")]
     DeleteAttachment(#[source] rusqlite::Error),
+
+    /// Workspace index metadata could not be read or written.
+    #[error("failed to update workspace index metadata for thread {thread_id}")]
+    WorkspaceIndexMeta {
+        /// Thread id for the index row.
+        thread_id: String,
+        /// Underlying SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
+
+    /// On-disk lexical workspace index store failed.
+    #[error("workspace lexical index at {path}: {message}")]
+    WorkspaceIndexStore {
+        /// Path to the lexical index database.
+        path: PathBuf,
+        /// Human-readable failure detail.
+        message: String,
+    },
+}
+
+/// Persisted lexical workspace index metadata for a thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbWorkspaceIndexMeta {
+    /// Owning thread id.
+    pub thread_id: String,
+    /// Lifecycle phase label (`absent` / `running` / `done` / `failed` / `cancelled`).
+    pub phase: String,
+    /// Workspace root path the index was built against, if any.
+    pub workspace_root: Option<String>,
+    /// Number of documents in the corpus.
+    pub entry_count: i64,
+    /// Total body bytes in the corpus.
+    pub byte_count: i64,
+    /// Whether the build stopped early due to caps or cancel.
+    pub truncated: bool,
+    /// Failure message when phase is `failed`.
+    pub error_message: Option<String>,
+    /// Path relative to the session data dir for the lexical DB file.
+    pub storage_relpath: Option<String>,
+    /// Build completion time as UTC Unix milliseconds.
+    pub built_at: Option<i64>,
+    /// Last metadata update time as UTC Unix milliseconds.
+    pub updated_at: i64,
 }
 
 /// Persisted message row returned by `ronin_db`.
@@ -399,6 +448,154 @@ impl RoninDb {
             )
             .map_err(|source| RoninDbError::UpdateThread {
                 id: id.to_string(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// Returns lexical workspace index metadata for a thread, if any row exists.
+    pub fn get_workspace_index_meta(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<DbWorkspaceIndexMeta>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT thread_id, phase, workspace_root, entry_count, byte_count, truncated,
+                        error_message, storage_relpath, built_at, updated_at
+                 FROM workspace_indexes WHERE thread_id = ?1",
+            )
+            .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                thread_id: thread_id.to_string(),
+                source,
+            })?;
+        let mut rows =
+            stmt.query(params![thread_id])
+                .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                    thread_id: thread_id.to_string(),
+                    source,
+                })?;
+        let Some(row) = rows
+            .next()
+            .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                thread_id: thread_id.to_string(),
+                source,
+            })?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(DbWorkspaceIndexMeta {
+            thread_id: row
+                .get(0)
+                .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                    thread_id: thread_id.to_string(),
+                    source,
+                })?,
+            phase: row
+                .get(1)
+                .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                    thread_id: thread_id.to_string(),
+                    source,
+                })?,
+            workspace_root: row
+                .get(2)
+                .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                    thread_id: thread_id.to_string(),
+                    source,
+                })?,
+            entry_count: row
+                .get(3)
+                .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                    thread_id: thread_id.to_string(),
+                    source,
+                })?,
+            byte_count: row
+                .get(4)
+                .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                    thread_id: thread_id.to_string(),
+                    source,
+                })?,
+            truncated: row
+                .get::<_, i64>(5)
+                .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                    thread_id: thread_id.to_string(),
+                    source,
+                })?
+                != 0,
+            error_message: row
+                .get(6)
+                .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                    thread_id: thread_id.to_string(),
+                    source,
+                })?,
+            storage_relpath: row
+                .get(7)
+                .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                    thread_id: thread_id.to_string(),
+                    source,
+                })?,
+            built_at: row
+                .get(8)
+                .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                    thread_id: thread_id.to_string(),
+                    source,
+                })?,
+            updated_at: row
+                .get(9)
+                .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                    thread_id: thread_id.to_string(),
+                    source,
+                })?,
+        }))
+    }
+
+    /// Inserts or replaces lexical workspace index metadata for a thread.
+    pub fn upsert_workspace_index_meta(&self, meta: &DbWorkspaceIndexMeta) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO workspace_indexes (
+                    thread_id, phase, workspace_root, entry_count, byte_count, truncated,
+                    error_message, storage_relpath, built_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT(thread_id) DO UPDATE SET
+                    phase = excluded.phase,
+                    workspace_root = excluded.workspace_root,
+                    entry_count = excluded.entry_count,
+                    byte_count = excluded.byte_count,
+                    truncated = excluded.truncated,
+                    error_message = excluded.error_message,
+                    storage_relpath = excluded.storage_relpath,
+                    built_at = excluded.built_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    meta.thread_id,
+                    meta.phase,
+                    meta.workspace_root,
+                    meta.entry_count,
+                    meta.byte_count,
+                    if meta.truncated { 1_i64 } else { 0_i64 },
+                    meta.error_message,
+                    meta.storage_relpath,
+                    meta.built_at,
+                    meta.updated_at,
+                ],
+            )
+            .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                thread_id: meta.thread_id.clone(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// Deletes lexical workspace index metadata for a thread.
+    pub fn delete_workspace_index_meta(&self, thread_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM workspace_indexes WHERE thread_id = ?1",
+                params![thread_id],
+            )
+            .map_err(|source| RoninDbError::WorkspaceIndexMeta {
+                thread_id: thread_id.to_string(),
                 source,
             })?;
         Ok(())

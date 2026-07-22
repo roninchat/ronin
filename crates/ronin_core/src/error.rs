@@ -56,4 +56,12 @@ pub enum RoninError {
         /// Path the caller attempted to register.
         path: PathBuf,
     },
+
+    /// Lexical workspace index operation failed.
+    #[error("workspace index error: {0}")]
+    WorkspaceIndex(String),
+
+    /// Internal lock for workspace index cancel flags was poisoned.
+    #[error("workspace index cancel lock poisoned")]
+    WorkspaceIndexCancelLock,
 }
