@@ -8,10 +8,12 @@
 //! - [`config`]: TOML preference/provider configuration types.
 //! - [`context`]: explicit user context parsing and attachment drafts.
 //! - [`screenshot`]: screenshot capture abstraction (portal / fallback).
+//! - [`clipboard_watch`]: opt-in clipboard watch → confirm-to-attach proposals.
 //! - [`providers`]: Ronin-owned provider traits and HTTP adapters.
 //! - [`session`]: filesystem/database-backed application session.
 //! - [`trust`]: host-enforced capability boundary and silent-context gates.
 
+pub mod clipboard_watch;
 pub mod config;
 pub mod context;
 pub mod domain;
@@ -21,11 +23,18 @@ pub mod screenshot;
 pub mod session;
 pub mod trust;
 
+pub use clipboard_watch::{
+    clipboard_watch_proposal_may_inject_into_chat_request, clipboard_watch_proposal_origin,
+    confirmed_clipboard_attach_may_inject_into_chat_request, confirmed_clipboard_attach_origin,
+    proposal_preview, ClipboardAttachProposal, ClipboardObserveOutcome, ClipboardTextSource,
+    ClipboardWatchController, ClipboardWatchError, ClipboardWatchPrefs, ScriptedClipboardSource,
+    CLIPBOARD_PROPOSAL_PREVIEW_CHARS,
+};
 pub use config::{
     clamp_sidebar_width, effective_sidebar_width, export_provider_config_toml,
     import_provider_config_toml, resolve_color_scheme, validate_provider_config_export,
-    ColorScheme, GeneralConfig, LoggingConfig, OllamaConfig, OpenAiConfig, PersonaConfig,
-    PersonaMode, ProviderConfigExport, RoninConfig, ThemePreference, UiConfig,
+    ClipboardWatchConfig, ColorScheme, GeneralConfig, LoggingConfig, OllamaConfig, OpenAiConfig,
+    PersonaConfig, PersonaMode, ProviderConfigExport, RoninConfig, ThemePreference, UiConfig,
     SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
 pub use context::{

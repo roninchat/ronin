@@ -15,6 +15,7 @@ use ronin::{
     },
     attachment_preview::{preview_from_attachment, preview_from_draft, AttachmentPreview},
     attachment_size::{AttachmentSizeWarnState, DEFAULT_ATTACHMENT_WARN_CHARS},
+    clipboard_watch::ArboardClipboardSource,
     completions,
     composer::ComposerEditor,
     composer_ingest::{
@@ -5496,6 +5497,31 @@ impl Render for RoninWindow {
                         tracing::warn!("clipboard paste failed: {e}");
                     }
                 }
+            }
+        }
+
+        // Opt-in clipboard watch → confirm-to-attach (never auto-attaches).
+        if self.shell.clipboard_watch_enabled() {
+            use ronin_core::ClipboardObserveOutcome;
+            match self
+                .shell
+                .poll_clipboard_watch(&ArboardClipboardSource::new())
+            {
+                Ok(ClipboardObserveOutcome::Proposed) => {
+                    if let Some(proposal) = self.shell.pending_clipboard_attach_proposal() {
+                        tracing::info!(
+                            id = %proposal.id,
+                            preview = %proposal.preview,
+                            "clipboard watch staged confirm-to-attach proposal"
+                        );
+                        self.attachment_errors.push(format!(
+                            "Clipboard changed — confirm to attach (preview: {})",
+                            proposal.preview
+                        ));
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => tracing::debug!(%e, "clipboard watch poll skipped"),
             }
         }
 

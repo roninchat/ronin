@@ -186,6 +186,26 @@ impl Default for LoggingConfig {
     }
 }
 
+/// Opt-in clipboard watcher preferences (default **off**).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardWatchConfig {
+    /// When true, clipboard text changes stage confirm-to-attach proposals.
+    #[serde(default = "default_clipboard_watch_enabled")]
+    pub enabled: bool,
+}
+
+fn default_clipboard_watch_enabled() -> bool {
+    false
+}
+
+impl Default for ClipboardWatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_clipboard_watch_enabled(),
+        }
+    }
+}
+
 /// The root configuration object loaded from config.toml.
 #[derive(serde::Serialize, serde::Deserialize, Default, Debug, Clone)]
 pub struct RoninConfig {
@@ -209,6 +229,9 @@ pub struct RoninConfig {
     /// Persistent file logging preferences.
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Opt-in clipboard watch → confirm-to-attach (default off).
+    #[serde(default)]
+    pub clipboard_watch: ClipboardWatchConfig,
 }
 
 /// Portable provider settings for import/export (never includes secrets).

@@ -35,6 +35,9 @@ pub mod attachment_preview;
 /// Wayland portal screenshot capture with CLI fallbacks.
 pub mod screenshot_capture;
 
+/// Opt-in clipboard watch host reader (arboard) for confirm-to-attach proposals.
+pub mod clipboard_watch;
+
 /// Syntax highlighting for fenced Markdown code blocks.
 pub mod syntax_highlight;
 

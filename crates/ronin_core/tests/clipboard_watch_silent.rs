@@ -1,0 +1,292 @@
+//! Focused silent-attach negatives + confirm gate corpus (#77).
+
+use ronin_core::{
+    clipboard_watch_proposal_may_inject_into_chat_request,
+    confirmed_clipboard_attach_may_inject_into_chat_request, may_inject_into_chat_request,
+    ClipboardObserveOutcome, ClipboardWatchController, ContextOrigin,
+};
+
+#[test]
+fn silent_attach_negatives_across_ambient_texts() {
+    let ambient: &[&str] = &[
+        "ambient-watch-candidate-000",
+        "ambient-watch-candidate-001",
+        "ambient-watch-candidate-002",
+        "ambient-watch-candidate-003",
+        "ambient-watch-candidate-004",
+        "ambient-watch-candidate-005",
+        "ambient-watch-candidate-006",
+        "ambient-watch-candidate-007",
+        "ambient-watch-candidate-008",
+        "ambient-watch-candidate-009",
+        "ambient-watch-candidate-010",
+        "ambient-watch-candidate-011",
+        "ambient-watch-candidate-012",
+        "ambient-watch-candidate-013",
+        "ambient-watch-candidate-014",
+        "ambient-watch-candidate-015",
+        "ambient-watch-candidate-016",
+        "ambient-watch-candidate-017",
+        "ambient-watch-candidate-018",
+        "ambient-watch-candidate-019",
+        "ambient-watch-candidate-020",
+        "ambient-watch-candidate-021",
+        "ambient-watch-candidate-022",
+        "ambient-watch-candidate-023",
+        "ambient-watch-candidate-024",
+        "ambient-watch-candidate-025",
+        "ambient-watch-candidate-026",
+        "ambient-watch-candidate-027",
+        "ambient-watch-candidate-028",
+        "ambient-watch-candidate-029",
+        "ambient-watch-candidate-030",
+        "ambient-watch-candidate-031",
+        "ambient-watch-candidate-032",
+        "ambient-watch-candidate-033",
+        "ambient-watch-candidate-034",
+        "ambient-watch-candidate-035",
+        "ambient-watch-candidate-036",
+        "ambient-watch-candidate-037",
+        "ambient-watch-candidate-038",
+        "ambient-watch-candidate-039",
+        "ambient-watch-candidate-040",
+        "ambient-watch-candidate-041",
+        "ambient-watch-candidate-042",
+        "ambient-watch-candidate-043",
+        "ambient-watch-candidate-044",
+        "ambient-watch-candidate-045",
+        "ambient-watch-candidate-046",
+        "ambient-watch-candidate-047",
+        "ambient-watch-candidate-048",
+        "ambient-watch-candidate-049",
+        "ambient-watch-candidate-050",
+        "ambient-watch-candidate-051",
+        "ambient-watch-candidate-052",
+        "ambient-watch-candidate-053",
+        "ambient-watch-candidate-054",
+        "ambient-watch-candidate-055",
+        "ambient-watch-candidate-056",
+        "ambient-watch-candidate-057",
+        "ambient-watch-candidate-058",
+        "ambient-watch-candidate-059",
+        "ambient-watch-candidate-060",
+        "ambient-watch-candidate-061",
+        "ambient-watch-candidate-062",
+        "ambient-watch-candidate-063",
+        "ambient-watch-candidate-064",
+        "ambient-watch-candidate-065",
+        "ambient-watch-candidate-066",
+        "ambient-watch-candidate-067",
+        "ambient-watch-candidate-068",
+        "ambient-watch-candidate-069",
+        "ambient-watch-candidate-070",
+        "ambient-watch-candidate-071",
+        "ambient-watch-candidate-072",
+        "ambient-watch-candidate-073",
+        "ambient-watch-candidate-074",
+        "ambient-watch-candidate-075",
+        "ambient-watch-candidate-076",
+        "ambient-watch-candidate-077",
+        "ambient-watch-candidate-078",
+        "ambient-watch-candidate-079",
+        "ambient-watch-candidate-080",
+        "ambient-watch-candidate-081",
+        "ambient-watch-candidate-082",
+        "ambient-watch-candidate-083",
+        "ambient-watch-candidate-084",
+        "ambient-watch-candidate-085",
+        "ambient-watch-candidate-086",
+        "ambient-watch-candidate-087",
+        "ambient-watch-candidate-088",
+        "ambient-watch-candidate-089",
+        "ambient-watch-candidate-090",
+        "ambient-watch-candidate-091",
+        "ambient-watch-candidate-092",
+        "ambient-watch-candidate-093",
+        "ambient-watch-candidate-094",
+        "ambient-watch-candidate-095",
+        "ambient-watch-candidate-096",
+        "ambient-watch-candidate-097",
+        "ambient-watch-candidate-098",
+        "ambient-watch-candidate-099",
+        "ambient-watch-candidate-100",
+        "ambient-watch-candidate-101",
+        "ambient-watch-candidate-102",
+        "ambient-watch-candidate-103",
+        "ambient-watch-candidate-104",
+        "ambient-watch-candidate-105",
+        "ambient-watch-candidate-106",
+        "ambient-watch-candidate-107",
+        "ambient-watch-candidate-108",
+        "ambient-watch-candidate-109",
+        "ambient-watch-candidate-110",
+        "ambient-watch-candidate-111",
+        "ambient-watch-candidate-112",
+        "ambient-watch-candidate-113",
+        "ambient-watch-candidate-114",
+        "ambient-watch-candidate-115",
+        "ambient-watch-candidate-116",
+        "ambient-watch-candidate-117",
+        "ambient-watch-candidate-118",
+        "ambient-watch-candidate-119",
+        "ambient-watch-candidate-120",
+        "ambient-watch-candidate-121",
+        "ambient-watch-candidate-122",
+        "ambient-watch-candidate-123",
+        "ambient-watch-candidate-124",
+        "ambient-watch-candidate-125",
+        "ambient-watch-candidate-126",
+        "ambient-watch-candidate-127",
+        "ambient-watch-candidate-128",
+        "ambient-watch-candidate-129",
+        "ambient-watch-candidate-130",
+        "ambient-watch-candidate-131",
+        "ambient-watch-candidate-132",
+        "ambient-watch-candidate-133",
+        "ambient-watch-candidate-134",
+        "ambient-watch-candidate-135",
+        "ambient-watch-candidate-136",
+        "ambient-watch-candidate-137",
+        "ambient-watch-candidate-138",
+        "ambient-watch-candidate-139",
+        "ambient-watch-candidate-140",
+        "ambient-watch-candidate-141",
+        "ambient-watch-candidate-142",
+        "ambient-watch-candidate-143",
+        "ambient-watch-candidate-144",
+        "ambient-watch-candidate-145",
+        "ambient-watch-candidate-146",
+        "ambient-watch-candidate-147",
+        "ambient-watch-candidate-148",
+        "ambient-watch-candidate-149",
+        "ambient-watch-candidate-150",
+        "ambient-watch-candidate-151",
+        "ambient-watch-candidate-152",
+        "ambient-watch-candidate-153",
+        "ambient-watch-candidate-154",
+        "ambient-watch-candidate-155",
+        "ambient-watch-candidate-156",
+        "ambient-watch-candidate-157",
+        "ambient-watch-candidate-158",
+        "ambient-watch-candidate-159",
+        "ambient-watch-candidate-160",
+        "ambient-watch-candidate-161",
+        "ambient-watch-candidate-162",
+        "ambient-watch-candidate-163",
+        "ambient-watch-candidate-164",
+        "ambient-watch-candidate-165",
+        "ambient-watch-candidate-166",
+        "ambient-watch-candidate-167",
+        "ambient-watch-candidate-168",
+        "ambient-watch-candidate-169",
+        "ambient-watch-candidate-170",
+        "ambient-watch-candidate-171",
+        "ambient-watch-candidate-172",
+        "ambient-watch-candidate-173",
+        "ambient-watch-candidate-174",
+        "ambient-watch-candidate-175",
+        "ambient-watch-candidate-176",
+        "ambient-watch-candidate-177",
+        "ambient-watch-candidate-178",
+        "ambient-watch-candidate-179",
+        "ambient-watch-candidate-180",
+        "ambient-watch-candidate-181",
+        "ambient-watch-candidate-182",
+        "ambient-watch-candidate-183",
+        "ambient-watch-candidate-184",
+        "ambient-watch-candidate-185",
+        "ambient-watch-candidate-186",
+        "ambient-watch-candidate-187",
+        "ambient-watch-candidate-188",
+        "ambient-watch-candidate-189",
+        "ambient-watch-candidate-190",
+        "ambient-watch-candidate-191",
+        "ambient-watch-candidate-192",
+        "ambient-watch-candidate-193",
+        "ambient-watch-candidate-194",
+        "ambient-watch-candidate-195",
+        "ambient-watch-candidate-196",
+        "ambient-watch-candidate-197",
+        "ambient-watch-candidate-198",
+        "ambient-watch-candidate-199",
+        "ambient-watch-candidate-200",
+        "ambient-watch-candidate-201",
+        "ambient-watch-candidate-202",
+        "ambient-watch-candidate-203",
+        "ambient-watch-candidate-204",
+        "ambient-watch-candidate-205",
+        "ambient-watch-candidate-206",
+        "ambient-watch-candidate-207",
+        "ambient-watch-candidate-208",
+        "ambient-watch-candidate-209",
+        "ambient-watch-candidate-210",
+        "ambient-watch-candidate-211",
+        "ambient-watch-candidate-212",
+        "ambient-watch-candidate-213",
+        "ambient-watch-candidate-214",
+        "ambient-watch-candidate-215",
+        "ambient-watch-candidate-216",
+        "ambient-watch-candidate-217",
+        "ambient-watch-candidate-218",
+        "ambient-watch-candidate-219",
+    ];
+    for text in ambient {
+        // Disabled: never propose, never inject.
+        let mut off = ClipboardWatchController::new();
+        assert_eq!(
+            off.observe_text(text),
+            ClipboardObserveOutcome::IgnoredDisabled
+        );
+        assert!(off.pending_proposal().is_none());
+        assert!(!clipboard_watch_proposal_may_inject_into_chat_request());
+        assert!(!may_inject_into_chat_request(
+            ContextOrigin::ClipboardWatchProposal
+        ));
+
+        // Enabled + proposed: still cannot inject until confirm.
+        let mut on = ClipboardWatchController::new();
+        on.enable(Some("seed-silent"));
+        assert_eq!(on.observe_text(text), ClipboardObserveOutcome::Proposed);
+        assert!(!may_inject_into_chat_request(
+            ContextOrigin::ClipboardWatchProposal
+        ));
+        assert!(!clipboard_watch_proposal_may_inject_into_chat_request());
+        let draft = on.confirm_pending().unwrap();
+        assert_eq!(draft.content.as_deref(), Some(*text));
+        assert!(confirmed_clipboard_attach_may_inject_into_chat_request());
+        assert!(may_inject_into_chat_request(
+            ContextOrigin::ConfirmToAttachAccepted
+        ));
+    }
+}
+
+#[test]
+fn disable_mid_proposal_blocks_inject_path() {
+    for i in 0..180usize {
+        let mut watch = ClipboardWatchController::new();
+        watch.enable(Some("m"));
+        watch.observe_text(&format!("mid-{i}"));
+        assert!(watch.pending_proposal().is_some());
+        watch.disable();
+        assert!(watch.pending_proposal().is_none());
+        assert!(watch.confirm_pending().is_none());
+        assert!(!may_inject_into_chat_request(
+            ContextOrigin::ClipboardWatchProposal
+        ));
+    }
+}
+
+#[test]
+fn proposal_origin_blocked_for_every_staged_id() {
+    for i in 0..120usize {
+        let mut watch = ClipboardWatchController::new();
+        watch.enable(Some("o"));
+        watch.observe_text(&format!("origin-block-{i}"));
+        assert!(watch.pending_proposal().is_some());
+        assert!(!clipboard_watch_proposal_may_inject_into_chat_request());
+        assert!(!may_inject_into_chat_request(
+            ContextOrigin::ClipboardWatchProposal
+        ));
+        watch.dismiss_pending();
+    }
+}

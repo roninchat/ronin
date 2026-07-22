@@ -3,9 +3,10 @@
 use std::sync::mpsc;
 
 use ronin_core::{
-    ChatProvider, ChatStreamEvent, ContextAttachmentDraft, HttpOllamaProvider, Message,
-    MessageRole, MessageStatus, OllamaProvider, OpenAiCompatibleProvider, RoninError, RoninPaths,
-    RoninSession, Thread,
+    ChatProvider, ChatStreamEvent, ClipboardAttachProposal, ClipboardObserveOutcome,
+    ClipboardTextSource, ClipboardWatchController, ContextAttachmentDraft, HttpOllamaProvider,
+    Message, MessageRole, MessageStatus, OllamaProvider, OpenAiCompatibleProvider, RoninError,
+    RoninPaths, RoninSession, Thread,
 };
 
 use crate::branches::{leaf_under_root, sibling_branch_nav, MessageNode};
@@ -166,6 +167,8 @@ pub struct RoninShell {
     manual_titles: std::collections::HashSet<String>,
     /// Receiver for background model title-generation results.
     title_gen_rx: Option<mpsc::Receiver<TitleGenResult>>,
+    /// Opt-in clipboard watch → confirm-to-attach (never silent-attaches).
+    clipboard_watch: ClipboardWatchController,
 }
 
 /// One thread's active streaming generation.
@@ -277,6 +280,16 @@ impl RoninShell {
             .as_deref()
             .and_then(|id| session.list_messages(id).ok());
 
+        let mut clipboard_watch = ClipboardWatchController::new();
+        let watch_enabled = session
+            .load_config()
+            .map(|c| c.clipboard_watch.enabled)
+            .unwrap_or(false);
+        if watch_enabled {
+            // Baseline is seeded on first host poll so existing clipboard is not proposed.
+            clipboard_watch.enable(None);
+        }
+
         Self {
             session,
             state: ShellState {
@@ -292,6 +305,7 @@ impl RoninShell {
             active_generations: std::collections::HashMap::new(),
             manual_titles: std::collections::HashSet::new(),
             title_gen_rx: None,
+            clipboard_watch,
         }
     }
 
@@ -582,6 +596,59 @@ impl RoninShell {
         config.ui.sidebar_collapsed = collapsed;
         self.session.save_config(&config)?;
         Ok(())
+    }
+
+    /// Whether the opt-in clipboard watcher is enabled (config + live controller).
+    pub fn clipboard_watch_enabled(&self) -> bool {
+        self.clipboard_watch.is_enabled()
+    }
+
+    /// Enables or disables clipboard watching and persists `[clipboard_watch] enabled`.
+    ///
+    /// Disabling clears any pending proposal immediately. Enabling clears proposals and
+    /// seeds a baseline from `current_clipboard` so existing contents are not proposed.
+    pub fn set_clipboard_watch_enabled(
+        &mut self,
+        enabled: bool,
+        current_clipboard: Option<&str>,
+    ) -> Result<()> {
+        let mut config = self.session.load_config()?;
+        config.clipboard_watch.enabled = enabled;
+        self.session.save_config(&config)?;
+        if enabled {
+            self.clipboard_watch.enable(current_clipboard);
+        } else {
+            self.clipboard_watch.disable();
+        }
+        Ok(())
+    }
+
+    /// Pending clipboard confirm-to-attach proposal, if any.
+    pub fn pending_clipboard_attach_proposal(&self) -> Option<&ClipboardAttachProposal> {
+        self.clipboard_watch.pending_proposal()
+    }
+
+    /// Observes clipboard text through the watch controller (no-op when disabled).
+    pub fn observe_clipboard_text(&mut self, text: &str) -> ClipboardObserveOutcome {
+        self.clipboard_watch.observe_text(text)
+    }
+
+    /// Polls a clipboard text source when watching is enabled.
+    pub fn poll_clipboard_watch(
+        &mut self,
+        source: &dyn ClipboardTextSource,
+    ) -> std::result::Result<ClipboardObserveOutcome, ronin_core::ClipboardWatchError> {
+        self.clipboard_watch.poll_source(source)
+    }
+
+    /// Confirms the pending clipboard proposal into an attachment draft (never silent).
+    pub fn confirm_clipboard_attach_proposal(&mut self) -> Option<ContextAttachmentDraft> {
+        self.clipboard_watch.confirm_pending()
+    }
+
+    /// Dismisses / ignores the pending clipboard proposal without attaching.
+    pub fn dismiss_clipboard_attach_proposal(&mut self) {
+        self.clipboard_watch.dismiss_pending();
     }
 
     /// Toggles sidebar collapse and persists the new state. Returns the new collapsed flag.
