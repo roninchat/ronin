@@ -73,9 +73,9 @@ impl FolderListOptions {
     /// Whether another progressive deepen step can raise caps further.
     #[must_use]
     pub fn can_deepen(&self) -> bool {
-        let clamped = self.clone().clamp_to_ceilings();
-        clamped.max_depth < FOLDER_LIST_DEPTH_CEILING
-            || clamped.max_entries < FOLDER_LIST_ENTRIES_CEILING
+        let depth = self.max_depth.min(FOLDER_LIST_DEPTH_CEILING);
+        let entries = self.max_entries.min(FOLDER_LIST_ENTRIES_CEILING);
+        depth < FOLDER_LIST_DEPTH_CEILING || entries < FOLDER_LIST_ENTRIES_CEILING
     }
 
     /// Next progressive reveal step toward the documented ceilings.
@@ -108,13 +108,20 @@ impl FolderListOptions {
     }
 }
 
-fn path_matches_browse_filter(relative_path: &str, filter: Option<&str>) -> bool {
+/// Returns whether `relative_path` matches an optional browse filter
+/// (case-insensitive substring). Empty / whitespace filters match everything.
+#[must_use]
+pub fn folder_entry_matches_browse_filter(relative_path: &str, filter: Option<&str>) -> bool {
     let Some(filter) = filter.map(str::trim).filter(|f| !f.is_empty()) else {
         return true;
     };
     relative_path
         .to_ascii_lowercase()
         .contains(&filter.to_ascii_lowercase())
+}
+
+fn path_matches_browse_filter(relative_path: &str, filter: Option<&str>) -> bool {
+    folder_entry_matches_browse_filter(relative_path, filter)
 }
 
 /// Default character threshold before attachment size warnings appear (~6k tokens).

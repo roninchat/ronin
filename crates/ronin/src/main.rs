@@ -29,6 +29,7 @@ use ronin::{
     },
     folder_attach::{
         folder_browse_filter_placeholder, folder_reveal_more_label, FolderAttachState,
+        FOLDER_ATTACH_UI_VISIBLE_CAP,
     },
     global_search::{
         artifact_document, group_hits_by_kind, memory_document, search, thread_message_document,
@@ -219,6 +220,8 @@ pub(crate) fn open_main_window(
                     artifact_content_focus: cx.focus_handle(),
                     pending_attachments: Vec::new(),
                     pending_folder_attaches: Vec::new(),
+                    folder_browse_editors: Vec::new(),
+                    folder_filter_focus: None,
                     attachment_size_warn: AttachmentSizeWarnState::default(),
                     screenshot_capturer: Box::new(PortalOrFallbackScreenshotCapturer),
                     parsed_messages: std::collections::HashMap::new(),
@@ -288,6 +291,10 @@ struct RoninWindow {
     artifact_content_focus: FocusHandle,
     pending_attachments: Vec<ContextAttachmentDraft>,
     pending_folder_attaches: Vec<FolderAttachState>,
+    /// Browse-filter editors paired 1:1 with `pending_folder_attaches`.
+    folder_browse_editors: Vec<ComposerEditor>,
+    /// Which folder browse-filter editor is focused, if any.
+    folder_filter_focus: Option<usize>,
     attachment_size_warn: AttachmentSizeWarnState,
     screenshot_capturer: Box<dyn ScreenshotCapturer + Send>,
     parsed_messages:
@@ -381,7 +388,14 @@ impl RoninWindow {
         let result = ingest_dropped_paths(paths, workspace.as_deref(), &cwd, &policy);
         self.attachment_errors.clear();
         self.pending_attachments.extend(result.drafts);
+        let added = result.folders.len();
         self.pending_folder_attaches.extend(result.folders);
+        for _ in 0..added {
+            self.folder_browse_editors.push(ComposerEditor::new());
+        }
+        if added > 0 && self.folder_filter_focus.is_none() {
+            self.folder_filter_focus = Some(self.pending_folder_attaches.len() - added);
+        }
         self.attachment_errors.extend(result.errors);
         self.attachment_size_warn.clear();
         cx.notify();
@@ -519,9 +533,17 @@ impl RoninWindow {
         chars
     }
 
+    fn clear_pending_folder_attaches(&mut self) {
+        self.pending_folder_attaches.clear();
+        self.folder_browse_editors.clear();
+        self.folder_filter_focus = None;
+    }
+
     fn materialize_folder_attachments(&mut self) -> Vec<ContextAttachmentDraft> {
         let mut out = Vec::new();
         let folders = std::mem::take(&mut self.pending_folder_attaches);
+        self.folder_browse_editors.clear();
+        self.folder_filter_focus = None;
         for folder in folders {
             match folder.to_context_draft() {
                 Ok(draft) => out.push(draft),
@@ -529,6 +551,19 @@ impl RoninWindow {
             }
         }
         out
+    }
+
+    fn sync_folder_browse_filters_from_editors(&mut self) {
+        while self.folder_browse_editors.len() < self.pending_folder_attaches.len() {
+            self.folder_browse_editors.push(ComposerEditor::new());
+        }
+        self.folder_browse_editors
+            .truncate(self.pending_folder_attaches.len());
+        for (i, folder) in self.pending_folder_attaches.iter_mut().enumerate() {
+            if let Some(ed) = self.folder_browse_editors.get(i) {
+                folder.set_browse_filter(ed.text().to_string());
+            }
+        }
     }
 
     /// Progressive deepen of a pending folder listing under documented caps.
@@ -1031,7 +1066,7 @@ impl RoninWindow {
                 } else {
                     self.preattached_files.clear();
                     self.pending_attachments.clear();
-                    self.pending_folder_attaches.clear();
+                    self.clear_pending_folder_attaches();
                 }
                 cx.notify();
                 return;
@@ -1055,7 +1090,7 @@ impl RoninWindow {
                     Ok(()) => {
                         self.preattached_files.clear();
                         self.pending_attachments.clear();
-                        self.pending_folder_attaches.clear();
+                        self.clear_pending_folder_attaches();
                         cx.notify();
                     }
                     Err(err) => {
@@ -1075,7 +1110,7 @@ impl RoninWindow {
                 } else {
                     self.preattached_files.clear();
                     self.pending_attachments.clear();
-                    self.pending_folder_attaches.clear();
+                    self.clear_pending_folder_attaches();
                 }
                 cx.notify();
             }
@@ -1337,6 +1372,23 @@ impl RoninWindow {
 
         if alt_or_plat {
             return;
+        }
+
+        // Folder browse-filter field steals typing while focused.
+        if let Some(idx) = self.folder_filter_focus {
+            if let Some(ed) = self.folder_browse_editors.get_mut(idx) {
+                if ed.on_key_down(event) {
+                    self.blink_start = std::time::Instant::now();
+                    self.sync_folder_browse_filters_from_editors();
+                    cx.notify();
+                    return;
+                }
+                if ks.key.eq_ignore_ascii_case("escape") {
+                    self.folder_filter_focus = None;
+                    cx.notify();
+                    return;
+                }
+            }
         }
 
         // Reset blink timer on any user input so cursor is visible during typing
@@ -3698,6 +3750,32 @@ impl RoninWindow {
         // Folder attach file selection
         if !self.pending_folder_attaches.is_empty() {
             for (folder_idx, folder) in self.pending_folder_attaches.iter().enumerate() {
+                let filter_focused = self.folder_filter_focus == Some(folder_idx);
+                let filter_text = self
+                    .folder_browse_editors
+                    .get(folder_idx)
+                    .map(|e| e.text().to_string())
+                    .unwrap_or_else(|| folder.browse_filter().to_string());
+                let filter_opt = {
+                    let t = filter_text.trim();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t.to_string())
+                    }
+                };
+                let visible: Vec<_> = folder
+                    .listing()
+                    .entries
+                    .iter()
+                    .filter(|e| {
+                        ronin_core::folder_entry_matches_browse_filter(
+                            &e.relative_path,
+                            filter_opt.as_deref(),
+                        )
+                    })
+                    .take(FOLDER_ATTACH_UI_VISIBLE_CAP)
+                    .collect();
                 let mut panel = div()
                     .rounded_lg()
                     .border_1()
@@ -3717,16 +3795,44 @@ impl RoninWindow {
                                 folder.name(),
                                 folder.selected_count()
                             )),
-                    );
-                let filter = folder.browse_filter().trim();
-                if !filter.is_empty() {
-                    panel = panel.child(
+                    )
+                    .child(
                         div()
-                            .text_xs()
-                            .text_color(theme.text_muted)
-                            .child(format!("{} “{filter}”", folder_browse_filter_placeholder())),
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if filter_focused {
+                                theme.accent
+                            } else {
+                                theme.border_subtle
+                            })
+                            .px_2()
+                            .py_1()
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if filter_text.trim().is_empty() {
+                                        theme.text_muted
+                                    } else {
+                                        theme.text_primary
+                                    })
+                                    .child(if filter_text.trim().is_empty() {
+                                        folder_browse_filter_placeholder().to_string()
+                                    } else {
+                                        filter_text.clone()
+                                    }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    while this.folder_browse_editors.len() <= folder_idx {
+                                        this.folder_browse_editors.push(ComposerEditor::new());
+                                    }
+                                    this.folder_filter_focus = Some(folder_idx);
+                                    cx.notify();
+                                }),
+                            ),
                     );
-                }
                 if folder.listing().truncated {
                     panel = panel.child(
                         div()
@@ -3745,13 +3851,14 @@ impl RoninWindow {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
+                                    this.sync_folder_browse_filters_from_editors();
                                     this.reveal_more_folder_listing(folder_idx);
                                     cx.notify();
                                 }),
                             ),
                     );
                 }
-                for entry in folder.visible_entries().into_iter().take(40) {
+                for entry in visible {
                     let rel = entry.relative_path.clone();
                     let selected = folder.is_selected(&rel);
                     panel = panel.child(

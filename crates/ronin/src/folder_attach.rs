@@ -3,9 +3,12 @@
 use std::collections::BTreeSet;
 
 use ronin_core::{
-    folder_attachment_from_selection, ContextAttachmentDraft, ContextToolError, FolderEntry,
-    FolderListOptions, FolderListing,
+    folder_attachment_from_selection, folder_entry_matches_browse_filter, ContextAttachmentDraft,
+    ContextToolError, FolderEntry, FolderListOptions, FolderListing,
 };
+
+/// Max paths shown in the folder-attach panel (UI display cap, not the walk cap).
+pub const FOLDER_ATTACH_UI_VISIBLE_CAP: usize = 100;
 
 /// Interactive folder-attach state (listing + selection + browse filter).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +51,8 @@ impl FolderAttachState {
 
     /// Sets the browse filter used by [`Self::visible_entries`].
     ///
-    /// Does not change selection; empty/whitespace clears the filter.
+    /// Empty or whitespace-only text shows every listed entry (same rule as the
+    /// core walk-time filter). Does not change selection.
     pub fn set_browse_filter(&mut self, filter: impl Into<String>) {
         self.browse_filter = filter.into();
     }
@@ -61,21 +65,29 @@ impl FolderAttachState {
     /// Entries visible under the current browse filter (case-insensitive path substring).
     pub fn visible_entries(&self) -> Vec<&FolderEntry> {
         let filter = self.browse_filter.trim();
-        if filter.is_empty() {
-            return self.listing.entries.iter().collect();
-        }
-        let needle = filter.to_ascii_lowercase();
+        let filter = if filter.is_empty() {
+            None
+        } else {
+            Some(filter)
+        };
         self.listing
             .entries
             .iter()
-            .filter(|e| e.relative_path.to_ascii_lowercase().contains(&needle))
+            .filter(|e| folder_entry_matches_browse_filter(&e.relative_path, filter))
             .collect()
     }
 
     /// Options for a progressive deepen re-list of this folder.
+    ///
+    /// Carries the UI browse filter into the next walk so deepen + filter work together.
     #[must_use]
     pub fn deepen_options(&self) -> FolderListOptions {
-        self.listing.list_options.deepen()
+        let mut opts = self.listing.list_options.deepen();
+        let ui = self.browse_filter.trim();
+        if !ui.is_empty() {
+            opts = opts.with_browse_filter(ui);
+        }
+        opts
     }
 
     /// Whether progressive deepen can raise listing caps further.
