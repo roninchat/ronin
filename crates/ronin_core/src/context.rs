@@ -13,11 +13,109 @@ use crate::folder_filter::{
     FolderBlockReason, FolderListPolicy,
 };
 
-/// Maximum number of files included in a folder listing.
-pub const FOLDER_LIST_MAX_ENTRIES: usize = 200;
+/// Default maximum number of files included in a folder listing (initial reveal).
+///
+/// Raised above the M2 shallow walk (200) so `@folder` reaches more of a project
+/// before the user opts into progressive deepen or a lexical index.
+pub const FOLDER_LIST_MAX_ENTRIES: usize = 500;
 
-/// Maximum directory nesting depth for folder listings (root = 0).
-pub const FOLDER_LIST_MAX_DEPTH: usize = 2;
+/// Default maximum directory nesting depth for folder listings (root = 0).
+///
+/// Raised above the M2 shallow walk (2) for deeper on-demand listing under caps.
+pub const FOLDER_LIST_MAX_DEPTH: usize = 4;
+
+/// Hard ceiling for progressive deepen of directory nesting (documented).
+pub const FOLDER_LIST_DEPTH_CEILING: usize = 10;
+
+/// Hard ceiling for progressive deepen of listing entry count (documented).
+pub const FOLDER_LIST_ENTRIES_CEILING: usize = 2_000;
+
+/// Step applied to [`FolderListOptions::max_depth`] on each progressive deepen.
+pub const FOLDER_LIST_DEPTH_STEP: usize = 2;
+
+/// Step applied to [`FolderListOptions::max_entries`] on each progressive deepen.
+pub const FOLDER_LIST_ENTRIES_STEP: usize = 500;
+
+/// Options for bounded / progressive folder listing walks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderListOptions {
+    /// Maximum directory nesting depth (root = 0). Clamped to
+    /// [`FOLDER_LIST_DEPTH_CEILING`].
+    pub max_depth: usize,
+    /// Maximum files collected. Clamped to [`FOLDER_LIST_ENTRIES_CEILING`].
+    pub max_entries: usize,
+    /// Optional case-insensitive substring filter on relative paths.
+    ///
+    /// When set, only matching files are collected (directories are still walked
+    /// so deep matches remain reachable under caps).
+    pub browse_filter: Option<String>,
+}
+
+impl Default for FolderListOptions {
+    fn default() -> Self {
+        Self {
+            max_depth: FOLDER_LIST_MAX_DEPTH,
+            max_entries: FOLDER_LIST_MAX_ENTRIES,
+            browse_filter: None,
+        }
+    }
+}
+
+impl FolderListOptions {
+    /// Clamps depth/entries to the documented progressive ceilings.
+    #[must_use]
+    pub fn clamp_to_ceilings(mut self) -> Self {
+        self.max_depth = self.max_depth.min(FOLDER_LIST_DEPTH_CEILING);
+        self.max_entries = self.max_entries.min(FOLDER_LIST_ENTRIES_CEILING);
+        self
+    }
+
+    /// Whether another progressive deepen step can raise caps further.
+    #[must_use]
+    pub fn can_deepen(&self) -> bool {
+        let clamped = self.clone().clamp_to_ceilings();
+        clamped.max_depth < FOLDER_LIST_DEPTH_CEILING
+            || clamped.max_entries < FOLDER_LIST_ENTRIES_CEILING
+    }
+
+    /// Next progressive reveal step toward the documented ceilings.
+    #[must_use]
+    pub fn deepen(&self) -> Self {
+        Self {
+            max_depth: self
+                .max_depth
+                .saturating_add(FOLDER_LIST_DEPTH_STEP)
+                .min(FOLDER_LIST_DEPTH_CEILING),
+            max_entries: self
+                .max_entries
+                .saturating_add(FOLDER_LIST_ENTRIES_STEP)
+                .min(FOLDER_LIST_ENTRIES_CEILING),
+            browse_filter: self.browse_filter.clone(),
+        }
+    }
+
+    /// Sets a browse filter (empty / whitespace clears the filter).
+    #[must_use]
+    pub fn with_browse_filter(mut self, filter: impl Into<String>) -> Self {
+        let filter = filter.into();
+        let trimmed = filter.trim();
+        self.browse_filter = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+        self
+    }
+}
+
+fn path_matches_browse_filter(relative_path: &str, filter: Option<&str>) -> bool {
+    let Some(filter) = filter.map(str::trim).filter(|f| !f.is_empty()) else {
+        return true;
+    };
+    relative_path
+        .to_ascii_lowercase()
+        .contains(&filter.to_ascii_lowercase())
+}
 
 /// Default character threshold before attachment size warnings appear (~6k tokens).
 pub const DEFAULT_ATTACHMENT_WARN_CHARS: usize = 24_000;
@@ -481,7 +579,7 @@ pub struct FolderEntry {
     pub size_bytes: u64,
 }
 
-/// Bounded non-recursive-deep listing of files under a folder.
+/// Bounded listing of files under a folder (depth + entry caps).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderListing {
     /// Absolute resolved folder path.
@@ -492,6 +590,8 @@ pub struct FolderListing {
     pub entries: Vec<FolderEntry>,
     /// True when max depth or max entry count truncated the listing.
     pub truncated: bool,
+    /// Options (clamped) that produced this listing — used for progressive deepen.
+    pub list_options: FolderListOptions,
 }
 
 /// Lists files under `path` for folder attach (bounded depth + entry count).
@@ -512,7 +612,8 @@ pub fn list_folder_entries(
     )
 }
 
-/// Lists files under `path` using an explicit [`FolderListPolicy`].
+/// Lists files under `path` using an explicit [`FolderListPolicy`] and default
+/// [`FolderListOptions`].
 ///
 /// Listing never equals attaching — callers must still collect an explicit
 /// selection before building a folder attachment draft.
@@ -521,6 +622,28 @@ pub fn list_folder_entries_with_policy(
     workspace_root: Option<&Path>,
     process_cwd: impl AsRef<Path>,
     policy: &FolderListPolicy,
+) -> std::result::Result<FolderListing, ContextToolError> {
+    list_folder_entries_with_options(
+        path,
+        workspace_root,
+        process_cwd,
+        policy,
+        &FolderListOptions::default(),
+    )
+}
+
+/// Lists files under `path` with an explicit policy and listing options
+/// (depth/entry caps + optional browse filter).
+///
+/// Listing never equals attaching — callers must still collect an explicit
+/// selection before building a folder attachment draft. Ignore/deny/allow rules
+/// from [`FolderListPolicy`] still apply.
+pub fn list_folder_entries_with_options(
+    path: impl AsRef<Path>,
+    workspace_root: Option<&Path>,
+    process_cwd: impl AsRef<Path>,
+    policy: &FolderListPolicy,
+    options: &FolderListOptions,
 ) -> std::result::Result<FolderListing, ContextToolError> {
     let requested_path = path.as_ref();
     let resolved = resolve_context_path(requested_path, workspace_root, process_cwd);
@@ -570,6 +693,8 @@ pub fn list_folder_entries_with_policy(
         .unwrap_or("folder")
         .to_string();
 
+    let list_options = options.clone().clamp_to_ceilings();
+
     let mut gitignores = Vec::new();
     if policy.honor_gitignore {
         if let Some(gi) = load_gitignore_at(&resolved) {
@@ -579,15 +704,16 @@ pub fn list_folder_entries_with_policy(
 
     let mut entries = Vec::new();
     let mut truncated = false;
-    walk_folder(
-        &resolved,
-        &resolved,
-        0,
-        &policy,
-        &mut gitignores,
-        &mut entries,
-        &mut truncated,
-    )?;
+    {
+        let mut walk = FolderWalkState {
+            policy: &policy,
+            options: &list_options,
+            gitignores: &mut gitignores,
+            entries: &mut entries,
+            truncated: &mut truncated,
+        };
+        walk_folder(&resolved, &resolved, 0, &mut walk)?;
+    }
     entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
     Ok(FolderListing {
@@ -595,17 +721,23 @@ pub fn list_folder_entries_with_policy(
         name,
         entries,
         truncated,
+        list_options,
     })
+}
+
+struct FolderWalkState<'a> {
+    policy: &'a FolderListPolicy,
+    options: &'a FolderListOptions,
+    gitignores: &'a mut Vec<Gitignore>,
+    entries: &'a mut Vec<FolderEntry>,
+    truncated: &'a mut bool,
 }
 
 fn walk_folder(
     root: &Path,
     dir: &Path,
     depth: usize,
-    policy: &FolderListPolicy,
-    gitignores: &mut Vec<Gitignore>,
-    entries: &mut Vec<FolderEntry>,
-    truncated: &mut bool,
+    walk: &mut FolderWalkState<'_>,
 ) -> std::result::Result<(), ContextToolError> {
     let read = std::fs::read_dir(dir).map_err(|source| ContextToolError::ReadFile {
         path: dir.to_path_buf(),
@@ -616,8 +748,8 @@ fn walk_folder(
     children.sort_by_key(|e| e.file_name());
 
     for child in children {
-        if entries.len() >= FOLDER_LIST_MAX_ENTRIES {
-            *truncated = true;
+        if walk.entries.len() >= walk.options.max_entries {
+            *walk.truncated = true;
             return Ok(());
         }
         let path = child.path();
@@ -626,34 +758,33 @@ fn walk_folder(
             Err(_) => continue,
         };
         let is_dir = meta.is_dir();
-        if path_omitted_by_policy(root, &path, is_dir, meta.len(), policy, gitignores) {
+        if path_omitted_by_policy(
+            root,
+            &path,
+            is_dir,
+            meta.len(),
+            walk.policy,
+            walk.gitignores,
+        ) {
             continue;
         }
         if is_dir {
-            if depth >= FOLDER_LIST_MAX_DEPTH {
-                *truncated = true;
+            if depth >= walk.options.max_depth {
+                *walk.truncated = true;
                 continue;
             }
             let mut pushed_gitignore = false;
-            if policy.honor_gitignore {
+            if walk.policy.honor_gitignore {
                 if let Some(gi) = load_gitignore_at(&path) {
-                    gitignores.push(gi);
+                    walk.gitignores.push(gi);
                     pushed_gitignore = true;
                 }
             }
-            walk_folder(
-                root,
-                &path,
-                depth + 1,
-                policy,
-                gitignores,
-                entries,
-                truncated,
-            )?;
+            walk_folder(root, &path, depth + 1, walk)?;
             if pushed_gitignore {
-                gitignores.pop();
+                walk.gitignores.pop();
             }
-            if *truncated && entries.len() >= FOLDER_LIST_MAX_ENTRIES {
+            if *walk.truncated && walk.entries.len() >= walk.options.max_entries {
                 return Ok(());
             }
             continue;
@@ -666,7 +797,10 @@ fn walk_folder(
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        entries.push(FolderEntry {
+        if !path_matches_browse_filter(&rel, walk.options.browse_filter.as_deref()) {
+            continue;
+        }
+        walk.entries.push(FolderEntry {
             relative_path: rel,
             size_bytes: meta.len(),
         });

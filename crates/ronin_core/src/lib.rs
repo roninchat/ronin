@@ -33,10 +33,12 @@ pub use config::{
 pub use context::{
     artifact_attachment, attachment_content_chars, clipboard_attachment, context_path_base,
     folder_attachment_from_selection, image_mime_type, is_supported_image_path,
-    list_folder_entries, list_folder_entries_with_policy, memory_attachment, parse_context_tools,
-    read_file_attachment, resolve_context_path, screenshot_attachment, total_attachment_chars,
-    ContextAttachmentDraft, ContextToolError, ContextToolRef, FolderEntry, FolderListing,
-    ParsedContextTools, DEFAULT_ATTACHMENT_WARN_CHARS, FOLDER_LIST_MAX_DEPTH,
+    list_folder_entries, list_folder_entries_with_options, list_folder_entries_with_policy,
+    memory_attachment, parse_context_tools, read_file_attachment, resolve_context_path,
+    screenshot_attachment, total_attachment_chars, ContextAttachmentDraft, ContextToolError,
+    ContextToolRef, FolderEntry, FolderListOptions, FolderListing, ParsedContextTools,
+    DEFAULT_ATTACHMENT_WARN_CHARS, FOLDER_LIST_DEPTH_CEILING, FOLDER_LIST_DEPTH_STEP,
+    FOLDER_LIST_ENTRIES_CEILING, FOLDER_LIST_ENTRIES_STEP, FOLDER_LIST_MAX_DEPTH,
     FOLDER_LIST_MAX_ENTRIES, MAX_FILE_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES,
 };
 pub use domain::{

@@ -27,7 +27,9 @@ use ronin::{
     context_indicator::{
         fill_level_color, project_context_indicator, ContextEstimateInput, ContextIndicator,
     },
-    folder_attach::FolderAttachState,
+    folder_attach::{
+        folder_browse_filter_placeholder, folder_reveal_more_label, FolderAttachState,
+    },
     global_search::{
         artifact_document, group_hits_by_kind, memory_document, search, thread_message_document,
         thread_title_document, SearchContentKind, SearchDatePreset, SearchDocument, SearchHit,
@@ -69,10 +71,10 @@ use ronin_app::{
     MAX_MESSAGES,
 };
 use ronin_core::{
-    clamp_sidebar_width, clipboard_attachment, list_folder_entries_with_policy,
-    parse_context_tools, read_file_attachment, screenshot_attachment, ChatProvider,
-    ContextAttachmentDraft, ContextToolRef, HttpOllamaProvider, MessageRole, MessageStatus,
-    ScreenshotCapturer, ThemePreference,
+    clamp_sidebar_width, clipboard_attachment, list_folder_entries_with_options,
+    list_folder_entries_with_policy, parse_context_tools, read_file_attachment,
+    screenshot_attachment, ChatProvider, ContextAttachmentDraft, ContextToolRef,
+    HttpOllamaProvider, MessageRole, MessageStatus, ScreenshotCapturer, ThemePreference,
 };
 
 mod quick_overlay;
@@ -527,6 +529,35 @@ impl RoninWindow {
             }
         }
         out
+    }
+
+    /// Progressive deepen of a pending folder listing under documented caps.
+    fn reveal_more_folder_listing(&mut self, folder_idx: usize) {
+        let Some(folder) = self.pending_folder_attaches.get(folder_idx) else {
+            return;
+        };
+        if !folder.can_reveal_more() {
+            return;
+        }
+        let root = folder.listing().root.clone();
+        let options = folder.deepen_options();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let policy = match self.shell.folder_list_policy() {
+            Ok(policy) => policy,
+            Err(err) => {
+                self.attachment_errors
+                    .push(format!("folder privacy policy unavailable: {err}"));
+                return;
+            }
+        };
+        match list_folder_entries_with_options(&root, None, &cwd, &policy, &options) {
+            Ok(listing) => {
+                if let Some(folder) = self.pending_folder_attaches.get_mut(folder_idx) {
+                    folder.replace_listing(listing);
+                }
+            }
+            Err(err) => self.attachment_errors.push(err.to_string()),
+        }
     }
 
     fn attachment_warn_threshold(&self) -> usize {
@@ -3687,6 +3718,15 @@ impl RoninWindow {
                                 folder.selected_count()
                             )),
                     );
+                let filter = folder.browse_filter().trim();
+                if !filter.is_empty() {
+                    panel = panel.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.text_muted)
+                            .child(format!("{} “{filter}”", folder_browse_filter_placeholder())),
+                    );
+                }
                 if folder.listing().truncated {
                     panel = panel.child(
                         div()
@@ -3695,7 +3735,23 @@ impl RoninWindow {
                             .child(ronin::folder_attach::folder_truncated_hint()),
                     );
                 }
-                for entry in folder.listing().entries.iter().take(40) {
+                if folder.can_reveal_more() {
+                    panel = panel.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.accent)
+                            .cursor_pointer()
+                            .child(folder_reveal_more_label())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.reveal_more_folder_listing(folder_idx);
+                                    cx.notify();
+                                }),
+                            ),
+                    );
+                }
+                for entry in folder.visible_entries().into_iter().take(40) {
                     let rel = entry.relative_path.clone();
                     let selected = folder.is_selected(&rel);
                     panel = panel.child(
