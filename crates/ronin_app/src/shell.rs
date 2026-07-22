@@ -474,6 +474,69 @@ impl RoninShell {
         Ok(self.session.folder_list_policy()?)
     }
 
+    /// Status for a thread's lexical workspace index.
+    pub fn workspace_index_info(&self, thread_id: &str) -> Result<ronin_core::WorkspaceIndexInfo> {
+        Ok(self.session.workspace_index_info(thread_id)?)
+    }
+
+    /// Explicit one-shot “Index this workspace” build.
+    pub fn build_workspace_index(
+        &mut self,
+        thread_id: &str,
+    ) -> Result<ronin_core::WorkspaceIndexInfo> {
+        Ok(self.session.build_workspace_index(thread_id)?)
+    }
+
+    /// Rebuild lexical workspace index for a thread.
+    pub fn rebuild_workspace_index(
+        &mut self,
+        thread_id: &str,
+    ) -> Result<ronin_core::WorkspaceIndexInfo> {
+        Ok(self.session.rebuild_workspace_index(thread_id)?)
+    }
+
+    /// Request cancel of an in-progress workspace index build.
+    pub fn cancel_workspace_index(&mut self, thread_id: &str) -> Result<()> {
+        Ok(self.session.cancel_workspace_index(thread_id)?)
+    }
+
+    /// Delete workspace index metadata and on-disk corpus.
+    pub fn delete_workspace_index(&mut self, thread_id: &str) -> Result<()> {
+        Ok(self.session.delete_workspace_index(thread_id)?)
+    }
+
+    /// Lexical search over the thread workspace index (candidates only).
+    pub fn search_workspace_index(
+        &self,
+        thread_id: &str,
+        query: &str,
+    ) -> Result<Vec<ronin_core::WorkspaceIndexHit>> {
+        Ok(self.session.search_workspace_index(thread_id, query)?)
+    }
+
+    /// Lexical search with an explicit hit limit.
+    pub fn search_workspace_index_limited(
+        &self,
+        thread_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ronin_core::WorkspaceIndexHit>> {
+        Ok(self
+            .session
+            .search_workspace_index_limited(thread_id, query, limit)?)
+    }
+
+    /// Explicit attach of selected workspace-index hit paths into drafts.
+    pub fn attach_workspace_index_hits<P: AsRef<str>>(
+        &self,
+        thread_id: &str,
+        relative_paths: &[P],
+    ) -> Result<Vec<ronin_core::ContextAttachmentDraft>> {
+        Ok(self
+            .session
+            .attach_workspace_index_hits(thread_id, relative_paths)?)
+    }
+
     /// Lists available models from configured providers (best-effort).
     ///
     /// Returns `(provider_id, model_names)` pairs. Providers that are offline
