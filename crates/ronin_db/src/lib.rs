@@ -36,6 +36,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         5,
         include_str!("../migrations/0005_artifact_snippet_language.sql"),
     ),
+    (
+        6,
+        include_str!("../migrations/0006_thread_workspace_root.sql"),
+    ),
 ];
 
 /// Result type returned by `ronin_db` operations.
@@ -250,6 +254,8 @@ pub struct DbThread {
     pub model: Option<String>,
     /// Tip of the currently viewed conversation branch, if set.
     pub active_leaf_id: Option<String>,
+    /// Absolute filesystem path bound as this thread's workspace root, if any.
+    pub workspace_root: Option<String>,
 }
 
 /// Persisted artifact row returned by `ronin_db`.
@@ -358,6 +364,7 @@ impl RoninDb {
             provider: provider.map(String::from),
             model: model.map(String::from),
             active_leaf_id: None,
+            workspace_root: None,
         };
 
         self.conn
@@ -376,6 +383,25 @@ impl RoninDb {
             .map_err(RoninDbError::CreateThread)?;
 
         Ok(thread)
+    }
+
+    /// Sets or clears a thread's workspace root and bumps its updated_at timestamp.
+    pub fn update_thread_workspace_root(
+        &self,
+        id: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<()> {
+        let now = unix_timestamp_millis();
+        self.conn
+            .execute(
+                "UPDATE threads SET workspace_root = ?1, updated_at = ?2 WHERE id = ?3",
+                params![workspace_root, now, id],
+            )
+            .map_err(|source| RoninDbError::UpdateThread {
+                id: id.to_string(),
+                source,
+            })?;
+        Ok(())
     }
 
     /// Updates a thread's provider and bumps its updated_at timestamp.
@@ -428,7 +454,7 @@ impl RoninDb {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, title, created_at, updated_at, archived, provider, model, active_leaf_id FROM threads ORDER BY created_at ASC, id ASC",
+                "SELECT id, title, created_at, updated_at, archived, provider, model, active_leaf_id, workspace_root FROM threads ORDER BY created_at ASC, id ASC",
             )
             .map_err(RoninDbError::PrepareThreadList)?;
 
@@ -443,6 +469,7 @@ impl RoninDb {
                     provider: row.get(5)?,
                     model: row.get(6)?,
                     active_leaf_id: row.get(7)?,
+                    workspace_root: row.get(8)?,
                 })
             })
             .map_err(RoninDbError::QueryThreads)?

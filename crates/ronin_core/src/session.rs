@@ -129,6 +129,55 @@ impl RoninSession {
             .map_err(Into::into)
     }
 
+    /// Returns the opt-in workspace root bound to a thread, if any.
+    pub fn thread_workspace_root(&self, thread_id: &str) -> Result<Option<std::path::PathBuf>> {
+        let root = self
+            .list_threads()?
+            .into_iter()
+            .find(|t| t.id == thread_id)
+            .and_then(|t| t.workspace_root);
+        Ok(root)
+    }
+
+    /// Binds an explicit workspace root to a thread (opt-in; never auto-detected).
+    ///
+    /// The path must be an existing directory. Stored as an absolute path.
+    /// Binding does not attach files or inject context into the model.
+    pub fn set_thread_workspace_root(
+        &self,
+        thread_id: &str,
+        root: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        let root = root.as_ref();
+        let meta = std::fs::metadata(root).map_err(|_| RoninError::InvalidWorkspaceRoot {
+            path: root.to_path_buf(),
+        })?;
+        if !meta.is_dir() {
+            return Err(RoninError::InvalidWorkspaceRoot {
+                path: root.to_path_buf(),
+            });
+        }
+        let absolute = root.canonicalize().unwrap_or_else(|_| {
+            if root.is_absolute() {
+                root.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(root)
+            }
+        });
+        self.db
+            .update_thread_workspace_root(thread_id, Some(absolute.to_string_lossy().as_ref()))
+            .map_err(Into::into)
+    }
+
+    /// Clears the workspace root binding on a thread.
+    pub fn clear_thread_workspace_root(&self, thread_id: &str) -> Result<()> {
+        self.db
+            .update_thread_workspace_root(thread_id, None)
+            .map_err(Into::into)
+    }
+
     /// Creates and persists a new message in the given thread.
     pub fn create_message(
         &self,

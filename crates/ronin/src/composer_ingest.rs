@@ -47,7 +47,14 @@ pub fn format_drop_error(path: &Path, err: &ContextToolError) -> String {
 }
 
 /// Builds attachment drafts (and folder selection states) from dropped paths.
-pub fn ingest_dropped_paths(paths: &[PathBuf], cwd: &Path) -> DropIngestResult {
+///
+/// Relative paths resolve against `workspace_root` when the active thread has an
+/// explicit bind; otherwise against `cwd`. Absolute drops are unchanged.
+pub fn ingest_dropped_paths(
+    paths: &[PathBuf],
+    workspace_root: Option<&Path>,
+    cwd: &Path,
+) -> DropIngestResult {
     let mut drafts = Vec::new();
     let mut folders = Vec::new();
     let mut errors = Vec::new();
@@ -58,13 +65,13 @@ pub fn ingest_dropped_paths(paths: &[PathBuf], cwd: &Path) -> DropIngestResult {
             cwd.join(path)
         };
         if resolved.is_dir() {
-            match list_folder_entries(&resolved, cwd) {
+            match list_folder_entries(&resolved, workspace_root, cwd) {
                 Ok(listing) => folders.push(folder_attach_from_listing(listing)),
                 Err(err) => errors.push(format_drop_error(path, &err)),
             }
             continue;
         }
-        match read_file_attachment(path, cwd) {
+        match read_file_attachment(path, workspace_root, cwd) {
             Ok(draft) => drafts.push(draft),
             Err(err) => errors.push(format_drop_error(path, &err)),
         }

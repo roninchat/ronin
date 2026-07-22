@@ -42,4 +42,11 @@ pub enum RoninError {
     /// Ronin configuration read/write failed.
     #[error("config error: {0}")]
     Config(String),
+
+    /// Workspace root path is missing or not a directory.
+    #[error("workspace root must be an existing directory: {path}")]
+    InvalidWorkspaceRoot {
+        /// Path the caller attempted to bind.
+        path: PathBuf,
+    },
 }

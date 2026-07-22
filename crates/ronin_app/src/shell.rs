@@ -440,6 +440,35 @@ impl RoninShell {
         Ok(())
     }
 
+    /// Binds an opt-in workspace root to a thread and refreshes sidebar state.
+    ///
+    /// Does not attach files or inject context into the model.
+    pub fn set_thread_workspace_root(
+        &mut self,
+        thread_id: &str,
+        root: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        self.session.set_thread_workspace_root(thread_id, root)?;
+        self.state.threads = self.session.list_threads()?;
+        Ok(())
+    }
+
+    /// Clears the workspace root on a thread and refreshes sidebar state.
+    pub fn clear_thread_workspace_root(&mut self, thread_id: &str) -> Result<()> {
+        self.session.clear_thread_workspace_root(thread_id)?;
+        self.state.threads = self.session.list_threads()?;
+        Ok(())
+    }
+
+    /// Returns the workspace root for a thread from current shell state, if any.
+    pub fn thread_workspace_root(&self, thread_id: &str) -> Option<std::path::PathBuf> {
+        self.state
+            .threads
+            .iter()
+            .find(|t| t.id == thread_id)
+            .and_then(|t| t.workspace_root.clone())
+    }
+
     /// Lists available models from configured providers (best-effort).
     ///
     /// Returns `(provider_id, model_names)` pairs. Providers that are offline
