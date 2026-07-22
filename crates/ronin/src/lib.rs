@@ -32,8 +32,13 @@ pub mod artifacts_panel;
 /// Attachment preview models for composer and sent messages.
 pub mod attachment_preview;
 
-/// Wayland portal screenshot capture with CLI fallbacks.
+/// Wayland portal screenshot capture with CLI fallbacks (window target + fallback).
 pub mod screenshot_capture;
+
+pub use screenshot_capture::{
+    host_would_attempt_window_target, resolve_host_screenshot_plan,
+    PortalOrFallbackScreenshotCapturer,
+};
 
 /// Syntax highlighting for fenced Markdown code blocks.
 pub mod syntax_highlight;
