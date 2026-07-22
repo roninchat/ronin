@@ -31,9 +31,11 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
         "run" => {
             let scenario = args
                 .next()
-                .ok_or("usage: ronin-perf-harness run <scenario_id>")?;
-            let require_smoke = !args.any(|a| a == "--skip-smoke");
-            run_scenario(&scenario, require_smoke)
+                .ok_or("usage: ronin-perf-harness run <scenario_id> [--skip-smoke] [--fresh]")?;
+            let flags: Vec<String> = args.collect();
+            let require_smoke = !flags.iter().any(|a| a == "--skip-smoke");
+            let fresh = flags.iter().any(|a| a == "--fresh");
+            run_scenario(&scenario, require_smoke, fresh)
         }
         "propose-baseline" => {
             let scenario = args
@@ -65,7 +67,7 @@ fn print_help() {
 ronin-perf-harness — Chat Paint Path sensor+judge (tooling; not product)
 
 Commands:
-  run <scenario_id> [--skip-smoke]
+  run <scenario_id> [--skip-smoke] [--fresh]
   propose-baseline <scenario_id>
   accept-baseline <scenario_id>
   generate-sweep [count]
@@ -73,6 +75,7 @@ Commands:
 Scenarios: plain_short | heavy_fences | long_history
 
 Official judgments: build with --release (debug is exploratory only).
+Reuses the isolated DB by default; pass --fresh to wipe and re-migrate.
 "
     );
 }
@@ -99,10 +102,14 @@ fn budget_rules() -> BudgetRules {
     }
 }
 
-fn run_scenario(scenario: &str, require_smoke: bool) -> Result<bool, Box<dyn std::error::Error>> {
+fn run_scenario(
+    scenario: &str,
+    require_smoke: bool,
+    fresh: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let (workspace, scenarios, baselines, reports) = default_dirs();
     let isolation_root = workspace.join("target/perf-harness/isolated");
-    if isolation_root.exists() {
+    if fresh && isolation_root.exists() {
         std::fs::remove_dir_all(&isolation_root)?;
     }
     let paths = isolated_ronin_paths(&isolation_root)?;
@@ -147,10 +154,7 @@ fn run_scenario(scenario: &str, require_smoke: bool) -> Result<bool, Box<dyn std
 
 fn propose_baseline(scenario: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let (workspace, scenarios, baselines, reports) = default_dirs();
-    let isolation_root = workspace.join("target/perf-harness/isolated-propose");
-    if isolation_root.exists() {
-        std::fs::remove_dir_all(&isolation_root)?;
-    }
+    let isolation_root = workspace.join("target/perf-harness/isolated");
     let paths = isolated_ronin_paths(&isolation_root)?;
     let mut driver = SessionPaintDriver::new(paths, scenarios.clone(), Box::new(AlwaysOkSmoke));
     let harness = PerfHarness::new(PerfHarnessConfig {
@@ -197,10 +201,7 @@ fn accept_baseline(scenario: &str) -> Result<bool, Box<dyn std::error::Error>> {
 
 fn run_generated_sweep(n: usize) -> Result<bool, Box<dyn std::error::Error>> {
     let (workspace, scenarios, _baselines, reports) = default_dirs();
-    let isolation_root = workspace.join("target/perf-harness/isolated-sweep");
-    if isolation_root.exists() {
-        std::fs::remove_dir_all(&isolation_root)?;
-    }
+    let isolation_root = workspace.join("target/perf-harness/isolated");
     let paths = isolated_ronin_paths(&isolation_root)?;
     let messages = generate_scale_messages(n, true);
     let mut driver =

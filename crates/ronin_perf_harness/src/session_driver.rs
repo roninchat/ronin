@@ -3,7 +3,7 @@
 use ronin_core::{MessageRole, RoninPaths, RoninSession};
 
 use crate::error::HarnessError;
-use crate::paint::{at_least_one_ms, measure_chat_paint, ChatPaintDriver, DriveSmoke};
+use crate::paint::{ceil_to_millis, measure_chat_paint, ChatPaintDriver, DriveSmoke};
 use crate::scenario::{load_scenario_messages, ScenarioId};
 use crate::timing::PaintTiming;
 
@@ -69,11 +69,11 @@ impl ChatPaintDriver for SessionPaintDriver {
     ) -> Result<PaintTiming, HarnessError> {
         let messages = self.seed_and_collect(scenario)?;
         let mut timing = measure_chat_paint(&messages);
-        timing.parse = at_least_one_ms(timing.parse);
-        timing.render = at_least_one_ms(timing.render);
-        timing.wall = at_least_one_ms(timing.wall);
+        timing.parse = ceil_to_millis(timing.parse);
+        timing.render = ceil_to_millis(timing.render);
+        timing.wall = ceil_to_millis(timing.wall);
         for span in &mut timing.spans {
-            span.duration = at_least_one_ms(span.duration);
+            span.duration = ceil_to_millis(span.duration);
         }
         Ok(timing)
     }

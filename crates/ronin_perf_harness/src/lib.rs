@@ -19,8 +19,8 @@ pub use error::HarnessError;
 pub use isolation::isolated_ronin_paths;
 pub use judgment::{PerfJudgment, RankedHotspot};
 pub use paint::{
-    measure_chat_paint, parse_markdown_blocks, AlwaysOkSmoke, ChatPaintDriver, DisplayDriveSmoke,
-    DriveSmoke,
+    ceil_to_millis, measure_chat_paint, parse_markdown_blocks, AlwaysOkSmoke, ChatPaintDriver,
+    DisplayDriveSmoke, DriveSmoke,
 };
 pub use report::{write_improvement_signal, IsolationPaths, SignalMeta};
 pub use scenario::{generate_scale_messages, load_scenario_messages, ScenarioId, ScenarioKind};

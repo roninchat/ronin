@@ -1,10 +1,11 @@
 //! Chat Paint Path measurement and driver traits.
 
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::ThemeSet;
+use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
@@ -127,9 +128,7 @@ pub fn measure_chat_paint(messages: &[String]) -> PaintTiming {
     let parse = parse_start.elapsed();
 
     let render_start = Instant::now();
-    let ps = SyntaxSet::load_defaults_newlines();
-    let ts = ThemeSet::load_defaults();
-    let theme = &ts.themes["base16-ocean.dark"];
+    let (ps, theme) = highlight_assets();
     for blocks in &all_blocks {
         for block in blocks {
             if let MarkdownBlock::CodeBlock { language, content } = block {
@@ -137,7 +136,7 @@ pub fn measure_chat_paint(messages: &[String]) -> PaintTiming {
                     if let Some(syntax) = ps.find_syntax_by_token(lang) {
                         let mut highlighter = HighlightLines::new(syntax, theme);
                         for line in LinesWithEndings::from(content) {
-                            let _ = highlighter.highlight_line(line, &ps);
+                            let _ = highlighter.highlight_line(line, ps);
                         }
                     }
                 }
@@ -162,6 +161,18 @@ pub fn measure_chat_paint(messages: &[String]) -> PaintTiming {
             },
         ],
     }
+}
+
+fn highlight_assets() -> (&'static SyntaxSet, &'static Theme) {
+    static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
+    static THEMES: OnceLock<ThemeSet> = OnceLock::new();
+    let ps = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
+    let ts = THEMES.get_or_init(ThemeSet::load_defaults);
+    let theme = ts
+        .themes
+        .get("base16-ocean.dark")
+        .expect("syntect default theme base16-ocean.dark");
+    (ps, theme)
 }
 
 /// Drive Smoke that passes when a display is available (minimal operable-environment check).
@@ -193,11 +204,41 @@ impl DriveSmoke for AlwaysOkSmoke {
     }
 }
 
-/// Ensures a duration is at least 1ms for stable baseline JSON in very fast runs.
-pub fn at_least_one_ms(d: Duration) -> Duration {
+/// Rounds timing up to whole milliseconds for stable ms-based reports.
+///
+/// Sub-millisecond work would otherwise serialize/`as_millis()` as `0`, which
+/// makes hotspots look empty on tiny goldens like `plain_short`.
+pub fn ceil_to_millis(d: Duration) -> Duration {
     if d.is_zero() {
-        Duration::from_millis(1)
-    } else {
-        d
+        return Duration::from_millis(1);
+    }
+    let nanos = d.as_nanos();
+    let ceil_ms = nanos.div_ceil(1_000_000);
+    Duration::from_millis(ceil_ms as u64)
+}
+
+#[cfg(test)]
+mod ceil_tests {
+    use super::*;
+
+    #[test]
+    fn sub_millisecond_ceils_to_one_ms() {
+        assert_eq!(
+            ceil_to_millis(Duration::from_micros(400)),
+            Duration::from_millis(1)
+        );
+    }
+
+    #[test]
+    fn zero_ceils_to_one_ms_for_oracle_stability() {
+        assert_eq!(ceil_to_millis(Duration::ZERO), Duration::from_millis(1));
+    }
+
+    #[test]
+    fn whole_millis_unchanged() {
+        assert_eq!(
+            ceil_to_millis(Duration::from_millis(8)),
+            Duration::from_millis(8)
+        );
     }
 }
