@@ -1,0 +1,9 @@
+{
+  "parse": 200,
+  "render": 800,
+  "wall": 1200,
+  "spans": [
+    { "name": "markdown.parse", "duration": 200 },
+    { "name": "chat.render", "duration": 800 }
+  ]
+}

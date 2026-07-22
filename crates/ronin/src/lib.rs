@@ -5,6 +5,10 @@
 /// Markdown parsing and AST for GPUI rendering.
 pub mod markdown;
 
+/// Compile-time gated Perf Harness control plane (feature `harness` only).
+#[cfg(feature = "harness")]
+pub mod harness_control;
+
 /// Markdown AST rendering helpers for the GPUI shell.
 pub mod markdown_view;
 
