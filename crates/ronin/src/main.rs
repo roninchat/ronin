@@ -27,6 +27,7 @@ use ronin::{
     context_indicator::{
         fill_level_color, project_context_indicator, ContextEstimateInput, ContextIndicator,
     },
+    desktop_notifications::PortalDesktopNotifier,
     folder_attach::{
         folder_browse_filter_placeholder, folder_reveal_more_label, FolderAttachState,
         FOLDER_ATTACH_UI_VISIBLE_CAP,
@@ -75,7 +76,8 @@ use ronin_core::{
     clamp_sidebar_width, clipboard_attachment, list_folder_entries_with_options,
     list_folder_entries_with_policy, parse_context_tools, read_file_attachment,
     screenshot_attachment, ChatProvider, ContextAttachmentDraft, ContextToolRef,
-    HttpOllamaProvider, MessageRole, MessageStatus, ScreenshotCapturer, ThemePreference,
+    DesktopNotifier, HttpOllamaProvider, MessageRole, MessageStatus, ScreenshotCapturer,
+    ThemePreference,
 };
 
 mod quick_overlay;
@@ -224,6 +226,7 @@ pub(crate) fn open_main_window(
                     folder_filter_focus: None,
                     attachment_size_warn: AttachmentSizeWarnState::default(),
                     screenshot_capturer: Box::new(PortalOrFallbackScreenshotCapturer),
+                    desktop_notifier: Box::new(PortalDesktopNotifier::new()),
                     parsed_messages: std::collections::HashMap::new(),
                     completion_index: 0,
                     picker_suppressed: None,
@@ -297,6 +300,7 @@ struct RoninWindow {
     folder_filter_focus: Option<usize>,
     attachment_size_warn: AttachmentSizeWarnState,
     screenshot_capturer: Box<dyn ScreenshotCapturer + Send>,
+    desktop_notifier: Box<dyn DesktopNotifier + Send>,
     parsed_messages:
         std::collections::HashMap<String, (usize, Vec<ronin::markdown::MarkdownBlock>)>,
     completion_index: usize,
@@ -1609,6 +1613,7 @@ impl RoninWindow {
         let was_generating = self.shell.is_generation_active();
         let active = self.shell.poll_streaming();
         let title_active = self.shell.poll_title_generation();
+        self.flush_desktop_notifications();
         if !active && self.chat_provider.is_none() {
             self.chat_provider = self.resolve_active_chat_provider();
         }
@@ -1616,6 +1621,25 @@ impl RoninWindow {
             self.try_auto_title_after_exchange();
         }
         active || title_active
+    }
+
+    fn flush_desktop_notifications(&mut self) {
+        for request in self.shell.drain_pending_desktop_notifications() {
+            if let Err(e) = self.desktop_notifier.notify(&request) {
+                tracing::warn!(%e, notification_id = %request.id, "desktop notification failed");
+            }
+        }
+    }
+
+    fn pump_notification_focus_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        while let Some(thread_id) = self.desktop_notifier.poll_focus_thread() {
+            if let Err(e) = self.shell.select_thread(&thread_id) {
+                tracing::warn!(%e, %thread_id, "notification focus: failed to select thread");
+            }
+            window.activate_window();
+            cx.activate(true);
+            cx.notify();
+        }
     }
 
     /// Polls single-instance IPC and applies routed CLI intents.
@@ -5653,6 +5677,7 @@ impl Render for RoninWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let streaming_active = self.pump_streaming();
         let _ = self.pump_instance_ipc(window, cx);
+        self.pump_notification_focus_actions(window, cx);
         if self.needs_initial_focus {
             self.needs_initial_focus = false;
             window.focus(&self.composer_focus);

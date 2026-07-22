@@ -10,6 +10,7 @@
 //! - [`folder_filter`]: ignore/deny/allow policy for folder listing walks.
 //! - [`workspace_index`]: user-triggered one-shot lexical workspace index + search/attach gate.
 //! - [`screenshot`]: screenshot capture abstraction (portal / fallback).
+//! - [`notification`]: desktop notification request shaping (host port; no D-Bus).
 //! - [`providers`]: Ronin-owned provider traits and HTTP adapters.
 //! - [`session`]: filesystem/database-backed application session.
 //! - [`trust`]: host-enforced capability boundary and silent-context gates.
@@ -19,6 +20,7 @@ pub mod context;
 pub mod domain;
 pub mod error;
 pub mod folder_filter;
+pub mod notification;
 pub mod providers;
 pub mod screenshot;
 pub mod session;
@@ -28,7 +30,8 @@ pub mod workspace_index;
 pub use config::{
     clamp_sidebar_width, effective_sidebar_width, export_provider_config_toml,
     import_provider_config_toml, resolve_color_scheme, validate_provider_config_export,
-    ColorScheme, GeneralConfig, LocalKnowledgeConfig, LoggingConfig, OllamaConfig, OpenAiConfig,
+    ColorScheme, GeneralConfig, LocalKnowledgeConfig, LoggingConfig, NotificationsConfig,
+    OllamaConfig, OpenAiConfig,
     PersonaConfig, PersonaMode, ProviderConfigExport, RoninConfig, ThemePreference, UiConfig,
     SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
@@ -52,6 +55,13 @@ pub use error::{Result, RoninError};
 pub use folder_filter::{
     absolutize_path, folder_root_block_reason, path_is_under, FolderBlockReason, FolderListPolicy,
     BUILT_IN_DENY_DIR_NAMES, BUILT_IN_DENY_EXTENSIONS, BUILT_IN_DENY_FILE_NAMES,
+};
+pub use notification::{
+    interpret_notification_action, notification_may_inject_into_chat_request,
+    notification_payload_origin, shape_generation_notification, DesktopNotificationRequest,
+    DesktopNotifier, GenerationNotifyInput, GenerationNotifyKind, NotificationButton,
+    NotificationError, NotificationFocusAction, NotificationPrefs, NullDesktopNotifier,
+    RecordingDesktopNotifier, FOCUS_THREAD_ACTION, GENERATION_NOTIFICATION_ID_PREFIX,
 };
 pub use providers::{
     clear_model_cache, effective_system_prompt, get_cached_models, get_model_cache, CachedModels,

@@ -4513,6 +4513,7 @@ dependencies = [
  "arboard",
  "ashpd 0.11.1",
  "async-std",
+ "futures-util",
  "gpui",
  "image",
  "libc",

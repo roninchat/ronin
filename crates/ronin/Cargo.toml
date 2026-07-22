@@ -9,6 +9,7 @@ arboard.workspace = true
 # Match gpui's ashpd feature set (async-std). Enabling default tokio conflicts with gpui.
 ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
 async-std = "1.13"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 gpui = "0.2.2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 pulldown-cmark = "0.13.4"
