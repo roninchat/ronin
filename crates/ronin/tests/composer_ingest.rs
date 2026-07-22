@@ -28,7 +28,7 @@ fn ingest_dropped_paths_should_attach_multiple_supported_files() {
     let b = write_bytes(temp.path(), "b.png", b"\x89PNG\r\n\x1a\nfake");
     // tiny valid-enough png header; read_file_attachment only checks extension + size for images
 
-    let result = ingest_dropped_paths(&[a.clone(), b.clone()], temp.path());
+    let result = ingest_dropped_paths(&[a.clone(), b.clone()], None, temp.path());
     assert_eq!(result.drafts.len(), 2, "errors: {:?}", result.errors);
     assert!(result.errors.is_empty());
     assert_eq!(result.drafts[0].kind, AttachmentKind::File);
@@ -41,7 +41,7 @@ fn ingest_dropped_paths_should_attach_multiple_supported_files() {
 fn ingest_dropped_paths_should_report_unsupported_types_clearly() {
     let temp = TempDir::new().unwrap();
     let bin = write_bytes(temp.path(), "blob.bin", &[0, 1, 2, 3, 255, 0]);
-    let result = ingest_dropped_paths(&[bin], temp.path());
+    let result = ingest_dropped_paths(&[bin], None, temp.path());
     assert!(result.drafts.is_empty());
     assert_eq!(result.errors.len(), 1);
     let msg = result.errors[0].to_lowercase();
@@ -57,7 +57,8 @@ fn ingest_dropped_paths_should_partial_succeed_when_some_fail() {
     let temp = TempDir::new().unwrap();
     let ok = write_text(temp.path(), "ok.md", "# hi");
     let bad = write_bytes(temp.path(), "x.bin", b"abc\0def\xff");
-    let DropIngestResult { drafts, errors, .. } = ingest_dropped_paths(&[ok, bad], temp.path());
+    let DropIngestResult { drafts, errors, .. } =
+        ingest_dropped_paths(&[ok, bad], None, temp.path());
     assert_eq!(drafts.len(), 1);
     assert_eq!(errors.len(), 1);
     assert_eq!(drafts[0].name, "ok.md");
@@ -71,7 +72,7 @@ fn ingest_dropped_folder_should_open_folder_attach_selection() {
     std::fs::write(dir.join("a.md"), "one").unwrap();
     std::fs::write(dir.join("b.md"), "two").unwrap();
 
-    let result = ingest_dropped_paths(&[dir], temp.path());
+    let result = ingest_dropped_paths(&[dir], None, temp.path());
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert!(result.drafts.is_empty());
     assert_eq!(result.folders.len(), 1);

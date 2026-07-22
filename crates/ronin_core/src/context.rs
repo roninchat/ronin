@@ -158,6 +158,32 @@ fn is_ref_boundary(next: Option<char>) -> bool {
     next.is_none_or(char::is_whitespace)
 }
 
+/// Base directory for relative `@file` / `@folder` resolution.
+///
+/// When `workspace_root` is set (explicit thread bind), it wins. Otherwise
+/// `process_cwd` is used. Never auto-detects a git root or invents a workspace.
+pub fn context_path_base<'a>(workspace_root: Option<&'a Path>, process_cwd: &'a Path) -> &'a Path {
+    workspace_root.unwrap_or(process_cwd)
+}
+
+/// Resolves a `@file` / `@folder` path against an optional thread workspace root.
+///
+/// Absolute paths are returned unchanged. Relative paths use `workspace_root` when
+/// set; otherwise they join against `process_cwd`. Binding a workspace never
+/// attaches file contents by itself — callers still must read/list explicitly.
+pub fn resolve_context_path(
+    requested: impl AsRef<Path>,
+    workspace_root: Option<&Path>,
+    process_cwd: impl AsRef<Path>,
+) -> PathBuf {
+    let requested_path = requested.as_ref();
+    if requested_path.is_absolute() {
+        requested_path.to_path_buf()
+    } else {
+        context_path_base(workspace_root, process_cwd.as_ref()).join(requested_path)
+    }
+}
+
 /// Maximum file attachment size in bytes.
 pub const MAX_FILE_ATTACHMENT_BYTES: u64 = 1_048_576;
 
@@ -255,16 +281,16 @@ pub enum ContextToolError {
 }
 
 /// Reads a file selected by explicit `@file` context (text or image).
+///
+/// Relative paths resolve against `workspace_root` when set, otherwise against
+/// `process_cwd`. Absolute paths work with or without a workspace root.
 pub fn read_file_attachment(
     path: impl AsRef<Path>,
-    cwd: impl AsRef<Path>,
+    workspace_root: Option<&Path>,
+    process_cwd: impl AsRef<Path>,
 ) -> std::result::Result<ContextAttachmentDraft, ContextToolError> {
     let requested_path = path.as_ref();
-    let resolved_path = if requested_path.is_absolute() {
-        requested_path.to_path_buf()
-    } else {
-        cwd.as_ref().join(requested_path)
-    };
+    let resolved_path = resolve_context_path(requested_path, workspace_root, process_cwd);
 
     let metadata =
         std::fs::metadata(&resolved_path).map_err(|source| ContextToolError::FileMetadata {
@@ -455,16 +481,16 @@ pub struct FolderListing {
 }
 
 /// Lists files under `path` for folder attach (bounded depth + entry count).
+///
+/// Relative paths resolve against `workspace_root` when set, otherwise against
+/// `process_cwd`. Absolute paths work with or without a workspace root.
 pub fn list_folder_entries(
     path: impl AsRef<Path>,
-    cwd: impl AsRef<Path>,
+    workspace_root: Option<&Path>,
+    process_cwd: impl AsRef<Path>,
 ) -> std::result::Result<FolderListing, ContextToolError> {
     let requested_path = path.as_ref();
-    let resolved = if requested_path.is_absolute() {
-        requested_path.to_path_buf()
-    } else {
-        cwd.as_ref().join(requested_path)
-    };
+    let resolved = resolve_context_path(requested_path, workspace_root, process_cwd);
 
     let metadata =
         std::fs::metadata(&resolved).map_err(|source| ContextToolError::FileMetadata {
@@ -567,7 +593,7 @@ pub fn folder_attachment_from_selection(
             continue;
         }
         let full = listing.root.join(&entry.relative_path);
-        match read_file_attachment(&full, &listing.root) {
+        match read_file_attachment(&full, None, &listing.root) {
             Ok(file_draft) => {
                 total_bytes = total_bytes.saturating_add(entry.size_bytes);
                 blocks.push(format!(

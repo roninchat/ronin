@@ -54,7 +54,7 @@ fn read_file_attachment_should_resolve_relative_text_file_and_format_context() {
     let file_path = temp.path().join("notes.txt");
     std::fs::write(&file_path, "alpha\nbeta").expect("write fixture");
 
-    let draft = read_file_attachment("notes.txt", temp.path()).expect("read attachment");
+    let draft = read_file_attachment("notes.txt", None, temp.path()).expect("read attachment");
 
     assert_eq!(draft.name, "notes.txt");
     assert_eq!(
@@ -70,7 +70,8 @@ fn read_file_attachment_should_reject_files_over_one_mb() {
     let temp = TempDir::new().expect("temp dir");
     std::fs::write(temp.path().join("large.txt"), vec![b'a'; 1_048_577]).expect("write fixture");
 
-    let error = read_file_attachment("large.txt", temp.path()).expect_err("large file rejected");
+    let error =
+        read_file_attachment("large.txt", None, temp.path()).expect_err("large file rejected");
 
     assert!(matches!(error, ContextToolError::FileTooLarge { .. }));
     assert_eq!(
@@ -84,7 +85,7 @@ fn read_file_attachment_should_reject_binary_files_with_clear_error() {
     let temp = TempDir::new().expect("temp dir");
     std::fs::write(temp.path().join("image.bin"), b"abc\0def").expect("write fixture");
 
-    let error = read_file_attachment("image.bin", temp.path()).expect_err("binary rejected");
+    let error = read_file_attachment("image.bin", None, temp.path()).expect_err("binary rejected");
 
     assert!(matches!(error, ContextToolError::BinaryFile { .. }));
     assert_eq!(error.to_string(), "file image.bin appears to be binary");
@@ -159,7 +160,7 @@ fn read_file_attachment_should_attach_image_files_with_image_kind() {
     // JPEG SOI marker + null byte (would fail binary text check)
     std::fs::write(&path, b"\xff\xd8\xff\xe0\x00\x10JFIF\0rest").expect("write jpg");
 
-    let draft = read_file_attachment("photo.jpg", temp.path()).expect("read image");
+    let draft = read_file_attachment("photo.jpg", None, temp.path()).expect("read image");
 
     assert_eq!(draft.kind, AttachmentKind::Image);
     assert_eq!(draft.name, "photo.jpg");
@@ -181,7 +182,7 @@ fn read_file_attachment_should_accept_supported_image_extensions() {
     ] {
         let path = temp.path().join(name);
         std::fs::write(&path, b"\0img").expect("write");
-        let draft = read_file_attachment(name, temp.path()).expect(name);
+        let draft = read_file_attachment(name, None, temp.path()).expect(name);
         assert_eq!(draft.kind, AttachmentKind::Image, "{name}");
         assert_eq!(draft.mime_type, mime, "{name}");
     }
@@ -207,7 +208,7 @@ fn list_folder_entries_should_list_files_and_allow_selection_to_draft() {
     std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn x() {}").unwrap();
 
-    let listing = list_folder_entries(&root, temp.path()).expect("list");
+    let listing = list_folder_entries(&root, None, temp.path()).expect("list");
     assert_eq!(listing.name, "proj");
     assert!(!listing.truncated);
     let rels: Vec<_> = listing
@@ -248,7 +249,7 @@ fn list_folder_entries_should_bound_deep_listings() {
         std::fs::write(root.join(format!("top-{i}.txt")), "x").unwrap();
     }
 
-    let listing = list_folder_entries(&root, temp.path()).expect("list");
+    let listing = list_folder_entries(&root, None, temp.path()).expect("list");
     assert!(
         listing.truncated,
         "large/deep folders must report truncation"
