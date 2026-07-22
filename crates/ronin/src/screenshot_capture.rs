@@ -32,12 +32,15 @@ impl ScreenshotCapturer for PortalOrFallbackScreenshotCapturer {
     ) -> Result<PathBuf, ScreenshotError> {
         let caps = self.capabilities();
         let plan = plan_screenshot_capture(preference, caps);
-        // Prefer portal-backed modes; on total portal failure, CLI interactive fallback.
+        // Prefer portal-backed modes; on total portal failure, CLI fallback.
+        // Window-oriented CLI (`gnome-screenshot -w`) only when the plan's primary
+        // mode was Window (caps advertised support). Caps-driven interactive
+        // fallback must not re-attempt a window CLI path.
         match execute_screenshot_plan(self, dest_dir, plan) {
             Ok(path) => Ok(path),
             Err(portal_plan_err) => {
-                // Last resort: CLI tools (always interactive / full-output style).
-                capture_via_fallback(dest_dir, preference).map_err(|fallback_err| {
+                let prefer_window_cli = plan.primary == ScreenshotCaptureMode::Window;
+                capture_via_fallback(dest_dir, prefer_window_cli).map_err(|fallback_err| {
                     ScreenshotError::CaptureFailed(format!(
                         "portal plan failed ({portal_plan_err}); CLI fallback failed ({fallback_err})"
                     ))
@@ -162,7 +165,7 @@ fn urlencoding_decode(path: &str) -> String {
 
 fn capture_via_fallback(
     dest_dir: &Path,
-    preference: ScreenshotTargetPreference,
+    prefer_window_cli: bool,
 ) -> Result<PathBuf, ScreenshotError> {
     std::fs::create_dir_all(dest_dir)?;
     let dest = dest_dir.join(format!(
@@ -174,8 +177,8 @@ fn capture_via_fallback(
     ));
     let dest_str = dest.to_string_lossy().into_owned();
 
-    // Window preference: try gnome-screenshot -w first when available.
-    if preference == ScreenshotTargetPreference::Window {
+    // Window CLI only when the portal plan's primary mode was Window.
+    if prefer_window_cli {
         match Command::new("gnome-screenshot")
             .args(["-w", "-f", &dest_str])
             .status()

@@ -1212,24 +1212,17 @@ impl RoninWindow {
             PickerKind::AtAttachment => {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
                 match item.at_kind() {
-                    Some(AtAttachmentKind::Screenshot) => {
+                    Some(AtAttachmentKind::Screenshot | AtAttachmentKind::ScreenshotWindow) => {
+                        let preference = match item.at_kind() {
+                            Some(AtAttachmentKind::ScreenshotWindow) => {
+                                ronin_core::ScreenshotTargetPreference::Window
+                            }
+                            _ => ronin_core::ScreenshotTargetPreference::Interactive,
+                        };
                         self.composer.replace_range(picker.token_start, cursor, "");
                         self.completion_index = 0;
                         self.picker_suppressed = None;
-                        // Capture immediately (same as Screenshot button).
-                        match self.capture_screenshot_attachment() {
-                            Ok(draft) => self.pending_attachments.push(draft),
-                            Err(e) => self.attachment_errors.push(e),
-                        }
-                        true
-                    }
-                    Some(AtAttachmentKind::ScreenshotWindow) => {
-                        self.composer.replace_range(picker.token_start, cursor, "");
-                        self.completion_index = 0;
-                        self.picker_suppressed = None;
-                        match self.capture_screenshot_attachment_with_preference(
-                            ronin_core::ScreenshotTargetPreference::Window,
-                        ) {
+                        match self.capture_screenshot_attachment_with_preference(preference) {
                             Ok(draft) => self.pending_attachments.push(draft),
                             Err(e) => self.attachment_errors.push(e),
                         }

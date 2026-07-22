@@ -114,7 +114,7 @@ pub fn at_attachment_catalog() -> &'static [PickerItem] {
             kind: PickerItemKind::At(AtAttachmentKind::Screenshot),
         },
         PickerItem {
-            insert: "@screenshot",
+            insert: "@screenshot:window",
             label: "Capture window",
             kind: PickerItemKind::At(AtAttachmentKind::ScreenshotWindow),
         },

@@ -48,6 +48,19 @@ fn host_plan_fallback_flags_match_core_policy() {
 }
 
 #[test]
+fn host_window_cli_only_when_plan_primary_is_window() {
+    // Caps unsupported → interactive primary → must not prefer window CLI.
+    let unsupported = resolve_host_screenshot_plan(ScreenshotTargetPreference::Window, Some(1));
+    assert_eq!(unsupported.primary, ScreenshotCaptureMode::Interactive);
+    assert!(unsupported.fell_back_due_to_caps);
+
+    // Caps supported → window primary → window CLI allowed after portal failure.
+    let supported = resolve_host_screenshot_plan(ScreenshotTargetPreference::Window, Some(2));
+    assert_eq!(supported.primary, ScreenshotCaptureMode::Window);
+    assert!(!supported.fell_back_due_to_caps);
+}
+
+#[test]
 fn host_plan_matrix_over_common_portal_masks() {
     let masks = [0u32, 1, 2, 3, 4, 5, 6, 7, 8, 10, 15, 255];
     for mask in masks {
