@@ -49,4 +49,11 @@ pub enum RoninError {
         /// Path the caller attempted to bind.
         path: PathBuf,
     },
+
+    /// Never-list / allowlist path is missing or not a directory.
+    #[error("privacy path must be an existing directory: {path}")]
+    InvalidPrivacyPath {
+        /// Path the caller attempted to register.
+        path: PathBuf,
+    },
 }

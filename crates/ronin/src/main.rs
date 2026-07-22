@@ -365,7 +365,17 @@ impl RoninWindow {
         self.file_drop_active = false;
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let workspace = self.selected_thread_workspace_root();
-        let policy = self.shell.folder_list_policy().unwrap_or_default();
+        let policy = match self.shell.folder_list_policy() {
+            Ok(policy) => policy,
+            Err(err) => {
+                self.attachment_errors.clear();
+                self.attachment_errors
+                    .push(format!("folder privacy policy unavailable: {err}"));
+                self.attachment_size_warn.clear();
+                cx.notify();
+                return;
+            }
+        };
         let result = ingest_dropped_paths(paths, workspace.as_deref(), &cwd, &policy);
         self.attachment_errors.clear();
         self.pending_attachments.extend(result.drafts);
@@ -640,7 +650,14 @@ impl RoninWindow {
         let parsed = parse_context_tools(text);
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let workspace = self.selected_thread_workspace_root();
-        let policy = self.shell.folder_list_policy().unwrap_or_default();
+        let policy = match self.shell.folder_list_policy() {
+            Ok(policy) => policy,
+            Err(err) => {
+                self.attachment_errors
+                    .push(format!("folder privacy policy unavailable: {err}"));
+                return (parsed.visible_message, Vec::new());
+            }
+        };
         let mut attachments = self.pending_attachments.clone();
         attachments.extend(self.materialize_folder_attachments());
 
@@ -751,8 +768,8 @@ impl RoninWindow {
     fn composer_attachment_previews(&self) -> Vec<AttachmentPreview> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let workspace = self.selected_thread_workspace_root();
-        let policy = self.shell.folder_list_policy().unwrap_or_default();
         let mut drafts = self.pending_attachments.clone();
+        let policy = self.shell.folder_list_policy().ok();
         // Launch `--attach` previews resolve against process CWD only.
         for path in &self.preattached_files {
             if let Ok(draft) = read_file_attachment(path, None, &cwd) {
@@ -768,8 +785,11 @@ impl RoninWindow {
                     }
                 }
                 ContextToolRef::Folder(path) => {
+                    let Some(policy) = policy.as_ref() else {
+                        continue;
+                    };
                     if let Ok(listing) =
-                        list_folder_entries_with_policy(&path, workspace.as_deref(), &cwd, &policy)
+                        list_folder_entries_with_policy(&path, workspace.as_deref(), &cwd, policy)
                     {
                         let state = FolderAttachState::from_listing(listing);
                         if let Ok(draft) = state.to_context_draft() {

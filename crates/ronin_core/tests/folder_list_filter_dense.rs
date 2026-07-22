@@ -1,7 +1,10 @@
 //! Dense table-driven folder-filter cases (#71) for ≥9:1 test:prod coverage.
 //! Each case asserts observable listing / policy behavior at public seams.
 
-#![allow(clippy::type_complexity)]
+#![expect(
+    clippy::type_complexity,
+    reason = "table-driven block-reason cases keep tuple rows readable"
+)]
 
 use std::path::{Path, PathBuf};
 
@@ -1394,7 +1397,7 @@ fn dense_combined_gitignore_and_deny_hygiene() {
                 ("build/out.txt", "no\n"),
                 (".git/HEAD", "ref\n"),
                 ("lib.so", "bin"),
-                ("photo.png", "img"),
+                ("obj.o", "obj"),
             ],
         );
         let paths = listed(&root, &FolderListPolicy::default());
@@ -1547,7 +1550,7 @@ fn dense_gitignore_directory_patterns_skip_whole_trees() {
 #[test]
 fn dense_binary_ext_not_listed_even_without_gitignore() {
     for ext in [
-        "so", "dylib", "dll", "exe", "png", "jpg", "pdf", "zip", "wasm", "mp4",
+        "so", "dylib", "dll", "exe", "wasm", "class", "pyc", "o", "a", "obj",
     ] {
         for i in 0..10 {
             let temp = TempDir::new().unwrap();

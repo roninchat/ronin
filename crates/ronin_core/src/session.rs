@@ -670,11 +670,11 @@ fn peek_logging_config(config_dir: &std::path::Path) -> LoggingConfig {
 }
 
 fn require_existing_dir(path: &Path) -> Result<PathBuf> {
-    let meta = std::fs::metadata(path).map_err(|_| RoninError::InvalidWorkspaceRoot {
+    let meta = std::fs::metadata(path).map_err(|_| RoninError::InvalidPrivacyPath {
         path: path.to_path_buf(),
     })?;
     if !meta.is_dir() {
-        return Err(RoninError::InvalidWorkspaceRoot {
+        return Err(RoninError::InvalidPrivacyPath {
             path: path.to_path_buf(),
         });
     }

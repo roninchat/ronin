@@ -9,8 +9,8 @@ use ignore::gitignore::Gitignore;
 
 use crate::domain::{Artifact, AttachmentKind, Memory};
 use crate::folder_filter::{
-    folder_root_block_reason, load_gitignore_at, path_omitted_by_policy, FolderBlockReason,
-    FolderListPolicy,
+    absolutize_path, folder_root_block_reason, load_gitignore_at, path_omitted_by_policy,
+    FolderBlockReason, FolderListPolicy,
 };
 
 /// Maximum number of files included in a folder listing.
@@ -524,6 +524,9 @@ pub fn list_folder_entries_with_policy(
 ) -> std::result::Result<FolderListing, ContextToolError> {
     let requested_path = path.as_ref();
     let resolved = resolve_context_path(requested_path, workspace_root, process_cwd);
+    let resolved = resolved
+        .canonicalize()
+        .unwrap_or_else(|_| absolutize_path(&resolved));
 
     let metadata =
         std::fs::metadata(&resolved).map_err(|source| ContextToolError::FileMetadata {
@@ -536,7 +539,25 @@ pub fn list_folder_entries_with_policy(
         });
     }
 
-    if let Some(reason) = folder_root_block_reason(&resolved, policy) {
+    let never_list: Vec<PathBuf> = policy
+        .never_list
+        .iter()
+        .map(|p| absolutize_path(p))
+        .collect();
+    let allowlist: Vec<PathBuf> = policy
+        .allowlist
+        .iter()
+        .map(|p| absolutize_path(p))
+        .collect();
+    let policy = FolderListPolicy {
+        honor_gitignore: policy.honor_gitignore,
+        apply_built_in_deny: policy.apply_built_in_deny,
+        never_list,
+        allowlist_enabled: policy.allowlist_enabled,
+        allowlist,
+    };
+
+    if let Some(reason) = folder_root_block_reason(&resolved, &policy) {
         return Err(ContextToolError::FolderBlocked {
             path: requested_path.to_path_buf(),
             reason,
@@ -562,7 +583,7 @@ pub fn list_folder_entries_with_policy(
         &resolved,
         &resolved,
         0,
-        policy,
+        &policy,
         &mut gitignores,
         &mut entries,
         &mut truncated,

@@ -72,9 +72,7 @@ pub const BUILT_IN_DENY_FILE_NAMES: &[&str] = &[
 /// File extensions always omitted by built-in deny hygiene (lowercase, no dot).
 pub const BUILT_IN_DENY_EXTENSIONS: &[&str] = &[
     "a", "o", "obj", "so", "dylib", "dll", "exe", "bin", "dat", "iso", "dmg", "wasm", "class",
-    "pyc", "pyo", "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "tar", "gz",
-    "tgz", "bz2", "xz", "7z", "rar", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "avi",
-    "mkv", "mov", "wav", "flac",
+    "pyc", "pyo",
 ];
 
 /// Returns whether `path` is equal to or nested under `ancestor`.
@@ -108,7 +106,7 @@ pub fn folder_root_block_reason(
 }
 
 /// Whether a path (file or directory) under a listing root should be omitted.
-pub fn path_omitted_by_policy(
+pub(crate) fn path_omitted_by_policy(
     root: &Path,
     path: &Path,
     is_dir: bool,
@@ -170,7 +168,7 @@ fn built_in_deny_omits(path: &Path, is_dir: bool, size_bytes: u64) -> bool {
 }
 
 /// Loads `.gitignore` at `dir` (if present) scoped to that directory.
-pub fn load_gitignore_at(dir: &Path) -> Option<Gitignore> {
+pub(crate) fn load_gitignore_at(dir: &Path) -> Option<Gitignore> {
     let gi_path = dir.join(".gitignore");
     if !gi_path.is_file() {
         return None;

@@ -76,7 +76,6 @@ fn built_in_deny_omits_vcs_dirs_binaries_and_oversized_files() {
             (".git/HEAD", "ref: refs/heads/main\n"),
             (".git/config", "[core]\n"),
             ("lib.so", "binary-ish"),
-            ("photo.png", "fake-png"),
             ("src/app.rs", "fn app() {}\n"),
         ],
     );
@@ -91,7 +90,7 @@ fn built_in_deny_omits_vcs_dirs_binaries_and_oversized_files() {
     assert!(
         !paths
             .iter()
-            .any(|p| p.starts_with(".git/") || *p == "lib.so" || *p == "photo.png"),
+            .any(|p| p.starts_with(".git/") || *p == "lib.so"),
         "built-in deny must omit VCS/binaries; got {paths:?}"
     );
     assert!(

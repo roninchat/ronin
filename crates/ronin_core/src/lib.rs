@@ -45,9 +45,8 @@ pub use domain::{
 };
 pub use error::{Result, RoninError};
 pub use folder_filter::{
-    absolutize_path, folder_root_block_reason, path_is_under, path_omitted_by_policy,
-    FolderBlockReason, FolderListPolicy, BUILT_IN_DENY_DIR_NAMES, BUILT_IN_DENY_EXTENSIONS,
-    BUILT_IN_DENY_FILE_NAMES,
+    absolutize_path, folder_root_block_reason, path_is_under, FolderBlockReason, FolderListPolicy,
+    BUILT_IN_DENY_DIR_NAMES, BUILT_IN_DENY_EXTENSIONS, BUILT_IN_DENY_FILE_NAMES,
 };
 pub use providers::{
     clear_model_cache, effective_system_prompt, get_cached_models, get_model_cache, CachedModels,
