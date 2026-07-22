@@ -426,8 +426,10 @@ fn deepen_options_carries_ui_browse_filter() {
 
 #[test]
 fn ui_visible_cap_is_documented_and_positive() {
-    assert!(FOLDER_ATTACH_UI_VISIBLE_CAP >= 40);
-    assert!(FOLDER_ATTACH_UI_VISIBLE_CAP <= 500);
+    const {
+        assert!(FOLDER_ATTACH_UI_VISIBLE_CAP >= 40);
+        assert!(FOLDER_ATTACH_UI_VISIBLE_CAP <= 500);
+    };
 }
 
 #[test]
