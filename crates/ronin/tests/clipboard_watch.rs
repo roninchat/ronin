@@ -102,3 +102,20 @@ fn host_confirm_dismiss_disable_grid() {
         }
     }
 }
+
+#[test]
+fn slash_catalog_exposes_clipboard_watch_actions() {
+    use ronin::composer_pickers::{slash_action_catalog, SlashActionKind};
+    let kinds: Vec<_> = slash_action_catalog()
+        .iter()
+        .filter_map(|i| i.slash_kind())
+        .collect();
+    assert!(kinds.contains(&SlashActionKind::ClipboardWatchToggle));
+    assert!(kinds.contains(&SlashActionKind::ClipboardWatchConfirm));
+    assert!(kinds.contains(&SlashActionKind::ClipboardWatchDismiss));
+    // Insert tokens are stable public seams.
+    let inserts: Vec<_> = slash_action_catalog().iter().map(|i| i.insert).collect();
+    assert!(inserts.contains(&"/clipboard-watch"));
+    assert!(inserts.contains(&"/clipboard-confirm"));
+    assert!(inserts.contains(&"/clipboard-dismiss"));
+}

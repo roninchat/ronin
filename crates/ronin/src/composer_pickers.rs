@@ -39,6 +39,12 @@ pub enum SlashActionKind {
     ClearComposer,
     /// `/model` — switch the active model.
     SwitchModel,
+    /// `/clipboard-watch` — toggle opt-in clipboard watch.
+    ClipboardWatchToggle,
+    /// `/clipboard-confirm` — confirm pending clipboard-watch attach proposal.
+    ClipboardWatchConfirm,
+    /// `/clipboard-dismiss` — dismiss pending clipboard-watch proposal.
+    ClipboardWatchDismiss,
 }
 
 /// One row in an `@` or `/` picker menu.
@@ -141,6 +147,21 @@ pub fn slash_action_catalog() -> &'static [PickerItem] {
             insert: "/model",
             label: "Switch model",
             kind: PickerItemKind::Slash(SlashActionKind::SwitchModel),
+        },
+        PickerItem {
+            insert: "/clipboard-watch",
+            label: "Toggle clipboard watch",
+            kind: PickerItemKind::Slash(SlashActionKind::ClipboardWatchToggle),
+        },
+        PickerItem {
+            insert: "/clipboard-confirm",
+            label: "Confirm clipboard attach",
+            kind: PickerItemKind::Slash(SlashActionKind::ClipboardWatchConfirm),
+        },
+        PickerItem {
+            insert: "/clipboard-dismiss",
+            label: "Dismiss clipboard proposal",
+            kind: PickerItemKind::Slash(SlashActionKind::ClipboardWatchDismiss),
         },
     ]
 }
