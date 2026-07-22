@@ -814,16 +814,43 @@ impl RoninWindow {
     }
 
     fn capture_screenshot_attachment(&self) -> Result<ContextAttachmentDraft, String> {
+        self.capture_screenshot_attachment_with_preference(
+            ronin_core::ScreenshotTargetPreference::Interactive,
+        )
+    }
+
+    fn capture_screenshot_attachment_with_preference(
+        &self,
+        preference: ronin_core::ScreenshotTargetPreference,
+    ) -> Result<ContextAttachmentDraft, String> {
         let dest_dir = self.shell.session().paths().data_dir.join("screenshots");
         let path = self
             .screenshot_capturer
-            .capture(&dest_dir)
+            .capture_with_preference(&dest_dir, preference)
             .map_err(|e| e.to_string())?;
         screenshot_attachment(&path).map_err(|e| e.to_string())
     }
 
     fn take_screenshot_action(&mut self, cx: &mut Context<Self>) {
-        match self.capture_screenshot_attachment() {
+        self.take_screenshot_action_with_preference(
+            ronin_core::ScreenshotTargetPreference::Interactive,
+            cx,
+        );
+    }
+
+    fn take_window_screenshot_action(&mut self, cx: &mut Context<Self>) {
+        self.take_screenshot_action_with_preference(
+            ronin_core::ScreenshotTargetPreference::Window,
+            cx,
+        );
+    }
+
+    fn take_screenshot_action_with_preference(
+        &mut self,
+        preference: ronin_core::ScreenshotTargetPreference,
+        cx: &mut Context<Self>,
+    ) {
+        match self.capture_screenshot_attachment_with_preference(preference) {
             Ok(draft) => {
                 self.pending_attachments.push(draft);
                 cx.notify();
@@ -1299,12 +1326,17 @@ impl RoninWindow {
             PickerKind::AtAttachment => {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
                 match item.at_kind() {
-                    Some(AtAttachmentKind::Screenshot) => {
+                    Some(AtAttachmentKind::Screenshot | AtAttachmentKind::ScreenshotWindow) => {
+                        let preference = match item.at_kind() {
+                            Some(AtAttachmentKind::ScreenshotWindow) => {
+                                ronin_core::ScreenshotTargetPreference::Window
+                            }
+                            _ => ronin_core::ScreenshotTargetPreference::Interactive,
+                        };
                         self.composer.replace_range(picker.token_start, cursor, "");
                         self.completion_index = 0;
                         self.picker_suppressed = None;
-                        // Capture immediately (same as Screenshot button).
-                        match self.capture_screenshot_attachment() {
+                        match self.capture_screenshot_attachment_with_preference(preference) {
                             Ok(draft) => self.pending_attachments.push(draft),
                             Err(e) => self.attachment_errors.push(e),
                         }
@@ -3739,7 +3771,7 @@ impl RoninWindow {
             .can_drop(|value, _, _| value.is::<ExternalPaths>())
             .on_drop(cx.listener(Self::on_external_paths_drop));
 
-        // Screenshot action
+        // Screenshot actions (interactive + window-targeted when portal supports it)
         composer = composer.child(
             div()
                 .flex()
@@ -3760,6 +3792,24 @@ impl RoninWindow {
                             MouseButton::Left,
                             cx.listener(|this, _, _, cx| {
                                 this.take_screenshot_action(cx);
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .rounded_lg()
+                        .px_3()
+                        .py_1()
+                        .bg(theme.surface_muted)
+                        .text_xs()
+                        .text_color(theme.text_primary)
+                        .cursor_pointer()
+                        .child("Window")
+                        .hover(|style| style.bg(theme.surface_hover))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.take_window_screenshot_action(cx);
                             }),
                         ),
                 )

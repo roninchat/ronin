@@ -6,8 +6,10 @@ license.workspace = true
 
 [dependencies]
 arboard.workspace = true
-# Match gpui's ashpd feature set (async-std). Enabling default tokio conflicts with gpui.
-ashpd = { version = "0.11", default-features = false, features = ["async-std"] }
+# Prefer ashpd 0.13 for Screenshot portal `target` / AvailableTargets (Window).
+# Keep async-io (not tokio) so we do not conflict with gpui's runtime; gpui may
+# still pull ashpd 0.11 separately.
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "screenshot", "notification"] }
 async-std = "1.13"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 gpui = "0.2.2"

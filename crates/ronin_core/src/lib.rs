@@ -68,7 +68,15 @@ pub use providers::{
     ChatMessage, ChatProvider, ChatRequest, ChatStreamEvent, HttpOllamaProvider, OllamaHealth,
     OllamaProvider, OpenAiCompatibleProvider, RONIN_SYSTEM_PROMPT,
 };
-pub use screenshot::{FakeScreenshotCapturer, ScreenshotCapturer, ScreenshotError};
+pub use screenshot::{
+    capabilities_from_available_targets, capture_with_preference_plan, execute_screenshot_plan,
+    plan_screenshot_capture, portal_supports_window_target, screenshot_capture_bytes_origin,
+    screenshot_capture_may_inject_into_chat_request,
+    screenshot_explicit_attach_may_inject_into_chat_request, FakeScreenshotCapturer,
+    RecordingScreenshotCapturer, ScreenshotBackendCapabilities, ScreenshotCaptureMode,
+    ScreenshotCapturePlan, ScreenshotCapturer, ScreenshotError, ScreenshotModeRunner,
+    ScreenshotTargetPreference, SCREENSHOT_TARGET_WINDOW_BIT,
+};
 pub use session::RoninSession;
 pub use trust::{
     may_auto_execute, may_inject_into_chat_request, resolve_marker_tool, scrub_ambient_payload,
