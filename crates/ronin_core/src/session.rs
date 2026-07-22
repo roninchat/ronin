@@ -1,10 +1,15 @@
 //! Open Ronin application session backed by local filesystem state.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ronin_db::{
-    default_log_dir, init_tracing_with, FileLogOptions, RoninDb, DEFAULT_MAX_LOG_FILE_BYTES,
+    default_log_dir, delete_workspace_lexical_store, init_tracing_with, DbWorkspaceIndexMeta,
+    FileLogOptions, LexicalIndexDocument, RoninDb, WorkspaceLexicalStore,
+    DEFAULT_MAX_LOG_FILE_BYTES,
 };
 
 use crate::config::{LoggingConfig, RoninConfig};
@@ -13,11 +18,17 @@ use crate::domain::{
     MessageRole, RoninPaths, Thread,
 };
 use crate::error::{Result, RoninError};
+use crate::workspace_index::{
+    collect_workspace_index_documents, workspace_index_storage_path, WorkspaceIndexCaps,
+    WorkspaceIndexInfo, WorkspaceIndexPhase, WORKSPACE_INDEX_STORAGE_DIR,
+};
 
 /// Open Ronin application session backed by local filesystem state.
 pub struct RoninSession {
     db: RoninDb,
     paths: RoninPaths,
+    /// Per-thread cancel flags for in-progress one-shot index builds.
+    index_cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 impl RoninSession {
@@ -68,7 +79,11 @@ impl RoninSession {
         tracing::info!(data_dir = %paths.data_dir.display(), "ronin data directory ready");
 
         let db = RoninDb::open(paths.data_dir.join("ronin.db"))?;
-        Ok(Self { db, paths })
+        Ok(Self {
+            db,
+            paths,
+            index_cancel_flags: Mutex::new(HashMap::new()),
+        })
     }
 
     /// Returns the filesystem paths for this session.
@@ -177,6 +192,212 @@ impl RoninSession {
         self.db
             .update_thread_workspace_root(thread_id, None)
             .map_err(Into::into)
+    }
+
+    /// Returns status for a thread's lexical workspace index (absent when none).
+    pub fn workspace_index_info(&self, thread_id: &str) -> Result<WorkspaceIndexInfo> {
+        Ok(match self.db.get_workspace_index_meta(thread_id)? {
+            Some(meta) => self.info_from_meta(meta),
+            None => WorkspaceIndexInfo::absent(),
+        })
+    }
+
+    /// Explicit one-shot “Index this workspace” build for a thread with a bound root.
+    ///
+    /// Does not start on session open. Never merges corpus into chat assembly.
+    pub fn build_workspace_index(&self, thread_id: &str) -> Result<WorkspaceIndexInfo> {
+        self.build_workspace_index_with_caps(thread_id, &WorkspaceIndexCaps::default())
+    }
+
+    /// Rebuilds the lexical index (same as build; replaces any prior corpus).
+    pub fn rebuild_workspace_index(&self, thread_id: &str) -> Result<WorkspaceIndexInfo> {
+        self.build_workspace_index(thread_id)
+    }
+
+    /// One-shot build with explicit caps (tests / host orchestration).
+    pub fn build_workspace_index_with_caps(
+        &self,
+        thread_id: &str,
+        caps: &WorkspaceIndexCaps,
+    ) -> Result<WorkspaceIndexInfo> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.build_workspace_index_cancellable(thread_id, caps, cancel)
+    }
+
+    /// Build that observes a shared cancel flag (cooperative cancel / host threads).
+    pub fn build_workspace_index_cancellable(
+        &self,
+        thread_id: &str,
+        caps: &WorkspaceIndexCaps,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<WorkspaceIndexInfo> {
+        {
+            let mut flags = self
+                .index_cancel_flags
+                .lock()
+                .map_err(|_| RoninError::WorkspaceIndexCancelLock)?;
+            flags.insert(thread_id.to_string(), Arc::clone(&cancel));
+        }
+        let result = self.run_workspace_index_build(thread_id, caps, &cancel);
+        {
+            let mut flags = self
+                .index_cancel_flags
+                .lock()
+                .map_err(|_| RoninError::WorkspaceIndexCancelLock)?;
+            flags.remove(thread_id);
+        }
+        result
+    }
+
+    /// Requests cancel of an in-progress index build for `thread_id`.
+    pub fn cancel_workspace_index(&self, thread_id: &str) -> Result<()> {
+        let flags = self
+            .index_cancel_flags
+            .lock()
+            .map_err(|_| RoninError::WorkspaceIndexCancelLock)?;
+        if let Some(flag) = flags.get(thread_id) {
+            flag.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Deletes index metadata and on-disk lexical corpus for a thread.
+    pub fn delete_workspace_index(&self, thread_id: &str) -> Result<()> {
+        let storage = workspace_index_storage_path(&self.paths.data_dir, thread_id);
+        delete_workspace_lexical_store(&storage)?;
+        self.db.delete_workspace_index_meta(thread_id)?;
+        Ok(())
+    }
+
+    /// Absolute path where this thread's lexical index DB would live.
+    pub fn workspace_index_storage_path_for(&self, thread_id: &str) -> PathBuf {
+        workspace_index_storage_path(&self.paths.data_dir, thread_id)
+    }
+
+    fn run_workspace_index_build(
+        &self,
+        thread_id: &str,
+        caps: &WorkspaceIndexCaps,
+        cancel: &AtomicBool,
+    ) -> Result<WorkspaceIndexInfo> {
+        let root = self.thread_workspace_root(thread_id)?.ok_or_else(|| {
+            RoninError::WorkspaceIndex(
+                "thread has no workspace root; set one before indexing".into(),
+            )
+        })?;
+
+        let storage = workspace_index_storage_path(&self.paths.data_dir, thread_id);
+        let storage_relpath = format!("{WORKSPACE_INDEX_STORAGE_DIR}/{thread_id}.db");
+        let now = unix_now_ms();
+        let prior_done = self
+            .db
+            .get_workspace_index_meta(thread_id)?
+            .filter(|m| m.phase == WorkspaceIndexPhase::Done.as_str());
+
+        self.db.upsert_workspace_index_meta(&DbWorkspaceIndexMeta {
+            thread_id: thread_id.to_string(),
+            phase: WorkspaceIndexPhase::Running.as_str().to_string(),
+            workspace_root: Some(root.to_string_lossy().into_owned()),
+            entry_count: 0,
+            byte_count: 0,
+            truncated: false,
+            error_message: None,
+            storage_relpath: Some(storage_relpath.clone()),
+            built_at: None,
+            updated_at: now,
+        })?;
+
+        let policy = self.folder_list_policy()?;
+        let collected = collect_workspace_index_documents(&root, &policy, caps, cancel);
+
+        if let Some(err) = collected.error_message {
+            let meta = DbWorkspaceIndexMeta {
+                thread_id: thread_id.to_string(),
+                phase: WorkspaceIndexPhase::Failed.as_str().to_string(),
+                workspace_root: Some(root.to_string_lossy().into_owned()),
+                entry_count: prior_done.as_ref().map(|p| p.entry_count).unwrap_or(0),
+                byte_count: prior_done.as_ref().map(|p| p.byte_count).unwrap_or(0),
+                truncated: false,
+                error_message: Some(err),
+                storage_relpath: Some(storage_relpath),
+                built_at: prior_done.as_ref().and_then(|p| p.built_at),
+                updated_at: unix_now_ms(),
+            };
+            self.db.upsert_workspace_index_meta(&meta)?;
+            // Leave any prior on-disk corpus untouched on failure.
+            return Ok(self.info_from_meta(meta));
+        }
+
+        if collected.cancelled {
+            let (entry_count, byte_count, storage, built_at) = match prior_done {
+                Some(p) => (p.entry_count, p.byte_count, p.storage_relpath, p.built_at),
+                None => (0, 0, Some(storage_relpath.clone()), None),
+            };
+            let meta = DbWorkspaceIndexMeta {
+                thread_id: thread_id.to_string(),
+                phase: WorkspaceIndexPhase::Cancelled.as_str().to_string(),
+                workspace_root: Some(root.to_string_lossy().into_owned()),
+                entry_count,
+                byte_count,
+                truncated: true,
+                error_message: None,
+                storage_relpath: storage,
+                built_at,
+                updated_at: unix_now_ms(),
+            };
+            self.db.upsert_workspace_index_meta(&meta)?;
+            // Do not replace on-disk corpus on cancel — preserve prior Done index.
+            return Ok(self.info_from_meta(meta));
+        }
+
+        let byte_count = collected.byte_count;
+        let truncated = collected.truncated;
+        let docs: Vec<LexicalIndexDocument> = collected
+            .documents
+            .into_iter()
+            .map(|d| LexicalIndexDocument {
+                relative_path: d.relative_path,
+                body: d.body,
+                byte_len: d.byte_len,
+            })
+            .collect();
+
+        let store = WorkspaceLexicalStore::open(&storage)?;
+        store.replace_documents(&docs)?;
+
+        let built_at = unix_now_ms();
+        let meta = DbWorkspaceIndexMeta {
+            thread_id: thread_id.to_string(),
+            phase: WorkspaceIndexPhase::Done.as_str().to_string(),
+            workspace_root: Some(root.to_string_lossy().into_owned()),
+            entry_count: docs.len() as i64,
+            byte_count: byte_count as i64,
+            truncated,
+            error_message: None,
+            storage_relpath: Some(storage_relpath),
+            built_at: Some(built_at),
+            updated_at: built_at,
+        };
+        self.db.upsert_workspace_index_meta(&meta)?;
+        Ok(self.info_from_meta(meta))
+    }
+
+    fn info_from_meta(&self, meta: DbWorkspaceIndexMeta) -> WorkspaceIndexInfo {
+        let phase = WorkspaceIndexPhase::parse(&meta.phase).unwrap_or(WorkspaceIndexPhase::Failed);
+        let storage_path = meta
+            .storage_relpath
+            .as_ref()
+            .map(|rel| self.paths.data_dir.join(rel));
+        WorkspaceIndexInfo {
+            phase,
+            workspace_root: meta.workspace_root.map(PathBuf::from),
+            entry_count: meta.entry_count as u64,
+            byte_count: meta.byte_count as u64,
+            truncated: meta.truncated,
+            error_message: meta.error_message,
+            storage_path,
+            built_at_ms: meta.built_at,
+        }
     }
 
     /// Builds the folder-list policy from persisted local-knowledge preferences.
@@ -679,4 +900,12 @@ fn require_existing_dir(path: &Path) -> Result<PathBuf> {
         });
     }
     Ok(crate::absolutize_path(path))
+}
+
+fn unix_now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }

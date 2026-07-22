@@ -8,6 +8,7 @@
 //! - [`config`]: TOML preference/provider configuration types.
 //! - [`context`]: explicit user context parsing and attachment drafts.
 //! - [`folder_filter`]: ignore/deny/allow policy for folder listing walks.
+//! - [`workspace_index`]: user-triggered one-shot lexical workspace index.
 //! - [`screenshot`]: screenshot capture abstraction (portal / fallback).
 //! - [`providers`]: Ronin-owned provider traits and HTTP adapters.
 //! - [`session`]: filesystem/database-backed application session.
@@ -22,6 +23,7 @@ pub mod providers;
 pub mod screenshot;
 pub mod session;
 pub mod trust;
+pub mod workspace_index;
 
 pub use config::{
     clamp_sidebar_width, effective_sidebar_width, export_provider_config_toml,
@@ -61,4 +63,11 @@ pub use session::RoninSession;
 pub use trust::{
     may_auto_execute, may_inject_into_chat_request, resolve_marker_tool, scrub_ambient_payload,
     AllowedTool, ContextOrigin, ToolDisposition, AMBIENT_REDACTED, FORBIDDEN_AGENCY_TOOL_NAMES,
+};
+pub use workspace_index::{
+    collect_workspace_index_documents, workspace_index_root_block, workspace_index_storage_path,
+    WorkspaceIndexBlock, WorkspaceIndexCaps, WorkspaceIndexCollectResult, WorkspaceIndexDocument,
+    WorkspaceIndexInfo, WorkspaceIndexPhase, WORKSPACE_INDEX_MAX_BYTES, WORKSPACE_INDEX_MAX_DEPTH,
+    WORKSPACE_INDEX_MAX_DURATION, WORKSPACE_INDEX_MAX_ENTRIES, WORKSPACE_INDEX_MAX_FILE_BYTES,
+    WORKSPACE_INDEX_STORAGE_DIR,
 };
