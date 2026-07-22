@@ -7,13 +7,13 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::folder_attach::{folder_attach_from_listing, FolderAttachState};
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
 use ronin_core::{
     list_folder_entries, read_file_attachment, AttachmentKind, ContextAttachmentDraft,
     ContextToolError, MAX_IMAGE_ATTACHMENT_BYTES,
 };
-use crate::folder_attach::{folder_attach_from_listing, FolderAttachState};
 
 /// Outcome of ingesting one or more dropped filesystem paths.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -160,12 +160,7 @@ pub fn paste_rgba_image(
     {
         let encoder = PngEncoder::new(Cursor::new(&mut png_bytes));
         encoder
-            .write_image(
-                rgba,
-                width as u32,
-                height as u32,
-                ExtendedColorType::Rgba8,
-            )
+            .write_image(rgba, width as u32, height as u32, ExtendedColorType::Rgba8)
             .map_err(|e| format!("failed to encode pasted image as PNG: {e}"))?;
     }
     paste_image_bytes(&png_bytes, "image/png", dest_dir)

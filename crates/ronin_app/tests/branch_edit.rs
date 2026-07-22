@@ -4,9 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use ronin_app::RoninShell;
-use ronin_core::{
-    ChatProvider, ChatRequest, ChatStreamEvent, MessageRole, RoninPaths,
-};
+use ronin_core::{ChatProvider, ChatRequest, ChatStreamEvent, RoninPaths};
 use tempfile::TempDir;
 
 struct FakeProvider {

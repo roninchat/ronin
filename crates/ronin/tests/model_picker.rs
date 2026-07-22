@@ -2,9 +2,9 @@
 
 use ronin::model_picker::{
     build_picker_entries, entries_from_listed_providers, format_capability_summary,
-    group_entries_by_provider, infer_model_capabilities, open_picker_at_active,
-    picker_row_colors, refresh_picker_entries, ModelPickerAction, ModelPickerKey,
-    ModelPickerState, ModelProviderKind, PickerRowTone,
+    group_entries_by_provider, infer_model_capabilities, open_picker_at_active, picker_row_colors,
+    refresh_picker_entries, ModelPickerAction, ModelPickerKey, ModelPickerState, ModelProviderKind,
+    PickerRowTone,
 };
 use ronin_core::ColorScheme;
 
@@ -107,7 +107,8 @@ fn picker_keyboard_should_navigate_select_and_dismiss() {
 
 #[test]
 fn picker_should_mark_active_entry() {
-    let entries = build_picker_entries(&[(ModelProviderKind::Ollama, vec!["a".into(), "b".into()])]);
+    let entries =
+        build_picker_entries(&[(ModelProviderKind::Ollama, vec!["a".into(), "b".into()])]);
     let marked = ronin::model_picker::mark_active_entry(&entries, "ollama", "b");
     assert!(!marked[0].is_active);
     assert!(marked[1].is_active);
@@ -130,7 +131,10 @@ fn open_picker_should_highlight_active_model() {
 fn entries_from_listed_providers_should_group_and_mark_active() {
     let listed = vec![
         ("openai".to_string(), vec!["gpt-4o".into()]),
-        ("ollama".to_string(), vec!["llama3.2".into(), "llava".into()]),
+        (
+            "ollama".to_string(),
+            vec!["llama3.2".into(), "llava".into()],
+        ),
         ("unknown".to_string(), vec!["skip-me".into()]),
     ];
     let entries = entries_from_listed_providers(&listed, Some("openai"), Some("gpt-4o"));
@@ -168,7 +172,7 @@ fn refresh_picker_entries_should_add_new_models_and_keep_highlight() {
 #[test]
 fn refresh_picker_entries_should_clamp_when_highlighted_model_removed() {
     let mut state = ModelPickerState::default();
-    let initial = build_picker_entries(&[(
+    let _initial = build_picker_entries(&[(
         ModelProviderKind::Ollama,
         vec!["a".into(), "b".into(), "c".into()],
     )]);

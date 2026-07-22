@@ -22,6 +22,7 @@ fn export_provider_config_should_include_base_urls_and_model_selection() {
             default_provider: Some("ollama".into()),
             default_model: Some("llama3.2".into()),
             auto_title: true,
+            attachment_warn_chars: 24_000,
         },
         ollama: OllamaConfig {
             base_url: "http://192.168.1.50:11434".into(),
@@ -34,7 +35,10 @@ fn export_provider_config_should_include_base_urls_and_model_selection() {
 
     let toml = export_provider_config_toml(&config).expect("export");
 
-    assert!(toml.contains("llama3.2"), "export should include default model");
+    assert!(
+        toml.contains("llama3.2"),
+        "export should include default model"
+    );
     assert!(
         toml.contains("http://192.168.1.50:11434"),
         "export should include ollama base URL"
@@ -98,8 +102,8 @@ base_url = "http://10.0.0.2:11434"
 base_url = "https://api.openai.com/v1"
 "#;
 
-    let merged = import_provider_config_toml(&session.load_config().unwrap(), imported)
-        .expect("import");
+    let merged =
+        import_provider_config_toml(&session.load_config().unwrap(), imported).expect("import");
     session.save_config(&merged).expect("save");
 
     let loaded = session.load_config().expect("reload");
@@ -115,8 +119,8 @@ base_url = "https://api.openai.com/v1"
 #[test]
 fn import_provider_config_should_report_clear_error_for_invalid_toml() {
     let current = RoninConfig::default();
-    let err = import_provider_config_toml(&current, "[[[not valid")
-        .expect_err("invalid toml must fail");
+    let err =
+        import_provider_config_toml(&current, "[[[not valid").expect_err("invalid toml must fail");
     let lower = err.to_lowercase();
     assert!(
         lower.contains("parse") || lower.contains("invalid") || lower.contains("toml"),
@@ -152,6 +156,7 @@ fn session_should_export_and_import_provider_config_files() {
                 default_provider: Some("ollama".into()),
                 default_model: Some("mistral".into()),
                 auto_title: true,
+                attachment_warn_chars: 24_000,
             },
             ollama: OllamaConfig {
                 base_url: "http://export-host:11434".into(),
@@ -171,9 +176,7 @@ fn session_should_export_and_import_provider_config_files() {
     assert!(!exported.to_lowercase().contains("api_key"));
 
     // Reset local config, then import.
-    session
-        .save_config(&RoninConfig::default())
-        .expect("reset");
+    session.save_config(&RoninConfig::default()).expect("reset");
     session
         .import_provider_config_from_file(&export_path)
         .expect("import file");

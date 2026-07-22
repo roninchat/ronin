@@ -89,11 +89,7 @@ pub fn leaf_under_root(all: &[MessageNode], root_id: &str) -> String {
             return current;
         }
         // Latest child wins (nodes are expected oldest→newest in `all`).
-        children.sort_by_key(|m| {
-            all.iter()
-                .position(|x| x.id == m.id)
-                .unwrap_or(usize::MAX)
-        });
+        children.sort_by_key(|m| all.iter().position(|x| x.id == m.id).unwrap_or(usize::MAX));
         current = children.last().unwrap().id.clone();
     }
 }

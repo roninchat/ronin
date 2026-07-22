@@ -122,10 +122,7 @@ fn create_snippet_artifact_should_persist_kind_and_language() {
     assert_eq!(artifact.language.as_deref(), Some("rust"));
     assert_eq!(artifact.content, "fn main() {}");
 
-    let fetched = db
-        .get_artifact(&artifact.id)
-        .expect("get")
-        .expect("exists");
+    let fetched = db.get_artifact(&artifact.id).expect("get").expect("exists");
     assert_eq!(fetched.kind, "snippet");
     assert_eq!(fetched.language.as_deref(), Some("rust"));
 }

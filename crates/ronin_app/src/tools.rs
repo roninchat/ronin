@@ -1,42 +1,51 @@
 //! Marker-based tool call parsing and execution against a Ronin session.
+//!
+//! Execution is gated by [`ronin_core::trust`] — mutate/shell/browser markers are
+//! refused by the host allowlist even when system-prompt text is replaced.
 
-use ronin_core::RoninSession;
+use ronin_core::{resolve_marker_tool, AllowedTool, RoninSession, ToolDisposition};
 
-/// A tool call requested by the assistant through inline markers.
+/// A tool call that the host allowlist permits to auto-execute.
 pub(crate) enum ToolCall {
+    /// List memories.
     ListMemories,
+    /// Fetch one memory by id.
     GetMemory(String),
 }
 
-/// Finds the last `[TOOL_CALL: ...]` marker that has no following result.
+/// Finds the last `[TOOL_CALL: …]` marker and returns an allowlisted call only.
+///
+/// Forbidden and unknown tools yield [`None`] here; callers that need an explicit
+/// refusal string should use [`refusal_tool_result`].
 pub(crate) fn parse_unexecuted_tool_call(text: &str) -> Option<ToolCall> {
-    let marker = "[TOOL_CALL:";
-    if let Some(pos) = text.rfind(marker) {
-        let rest = &text[pos..];
-        if rest.contains("[TOOL_RESULT:") {
-            return None;
-        }
-
-        let call_content_str = &text[pos + marker.len()..];
-        if let Some(end_pos) = call_content_str.find(']') {
-            let call_content = &call_content_str[..end_pos];
-            let parts: Vec<&str> = call_content.split(',').map(|s| s.trim()).collect();
-            if !parts.is_empty() {
-                let tool_name = parts[0].to_lowercase();
-                if tool_name == "list_memories" {
-                    return Some(ToolCall::ListMemories);
-                } else if tool_name == "get_memory" {
-                    for part in &parts[1..] {
-                        if let Some(stripped) = part.strip_prefix("id:") {
-                            let id = stripped.trim().trim_matches('"').trim_matches('\'');
-                            return Some(ToolCall::GetMemory(id.to_string()));
-                        }
-                    }
-                }
-            }
-        }
+    match resolve_marker_tool(text)? {
+        ToolDisposition::Allow(AllowedTool::ListMemories) => Some(ToolCall::ListMemories),
+        ToolDisposition::Allow(AllowedTool::GetMemory { id }) => Some(ToolCall::GetMemory(id)),
+        ToolDisposition::Refuse { .. } | ToolDisposition::Unknown { .. } => None,
     }
-    None
+}
+
+/// When the latest marker is refused or unknown, returns a `[TOOL_RESULT: …]` that
+/// records host refusal without executing any agency side effect.
+pub(crate) fn refusal_tool_result(text: &str) -> Option<String> {
+    match resolve_marker_tool(text)? {
+        ToolDisposition::Allow(_) => None,
+        ToolDisposition::Refuse { name } => Some(format!(
+            "[TOOL_RESULT: {name}, error: \"refused by host capability boundary\"]"
+        )),
+        ToolDisposition::Unknown { name } => Some(format!(
+            "[TOOL_RESULT: {name}, error: \"unknown tool; not registered\"]"
+        )),
+    }
+}
+
+/// Resolves the pending marker to either an allowlisted execution result or a
+/// host refusal/unknown result. Returns `None` when no pending marker exists.
+pub(crate) fn next_tool_result(session: &RoninSession, text: &str) -> Option<String> {
+    if let Some(tool_call) = parse_unexecuted_tool_call(text) {
+        return Some(execute_tool_call(session, &tool_call));
+    }
+    refusal_tool_result(text)
 }
 
 /// Executes a tool call and formats its `[TOOL_RESULT: ...]` block.

@@ -4,9 +4,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use ronin::{
-    acquire_instance, plan_incoming_launch, IncomingLaunch, LaunchIntent,
-};
+use ronin::{acquire_instance, plan_incoming_launch, IncomingLaunch, LaunchIntent};
 use tempfile::TempDir;
 
 fn runtime_dir() -> (TempDir, PathBuf) {

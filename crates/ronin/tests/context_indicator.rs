@@ -1,8 +1,9 @@
 //! Public seams for composer context/token size estimation and indicator presentation.
 
 use ronin::context_indicator::{
-    estimate_tokens_from_chars, fill_level_for_ratio, format_token_count, project_context_indicator,
-    resolve_model_context_window, ContextEstimateInput, ContextFillLevel,
+    estimate_tokens_from_chars, fill_level_for_ratio, format_token_count,
+    project_context_indicator, resolve_model_context_window, ContextEstimateInput,
+    ContextFillLevel,
 };
 use ronin_app::{MAX_CHARS, MAX_MESSAGES};
 
@@ -67,7 +68,7 @@ fn project_should_flag_omission_when_message_cap_exceeded() {
 
     assert!(indicator.messages_omitted);
     assert_eq!(
-        indicator.omission_label.as_deref(),
+        indicator.omission_label,
         Some("Older messages will be omitted")
     );
 }
@@ -96,7 +97,7 @@ fn project_should_flag_omission_when_char_cap_exceeded() {
         indicator.level
     );
     assert_eq!(
-        indicator.omission_label.as_deref(),
+        indicator.omission_label,
         Some("Older messages will be omitted")
     );
 }
@@ -143,7 +144,9 @@ fn project_should_show_model_window_when_known() {
     let window = resolve_model_context_window("gpt-4o").expect("known model");
     assert_eq!(indicator.limit_tokens, Some(window));
     assert!(
-        indicator.summary_label.contains(&format_token_count(window))
+        indicator
+            .summary_label
+            .contains(&format_token_count(window))
             || indicator.summary_label.contains('/'),
         "should show limit in label: {}",
         indicator.summary_label

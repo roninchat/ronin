@@ -15,13 +15,15 @@ mod shell;
 mod status;
 mod tools;
 
-pub use branches::{leaf_under_root, resolve_active_path, sibling_branch_nav, BranchNav, MessageNode};
+pub use branches::{
+    leaf_under_root, resolve_active_path, sibling_branch_nav, BranchNav, MessageNode,
+};
 pub use chat::{
     build_title_generation_request, collect_streamed_title, derive_thread_title,
     may_apply_auto_title, sanitize_generated_title, MAX_CHARS, MAX_MESSAGES,
 };
 pub use error::{Result, RoninAppError};
-pub use shell::{
-    RoninShell, ShellState, StreamUpdate, VisualDirection, VisualReuseDecision,
+pub use shell::{RoninShell, ShellState, StreamUpdate, VisualDirection, VisualReuseDecision};
+pub use status::{
+    format_provider_error, run_connection_test, ConnectionTestResult, ProviderStatus,
 };
-pub use status::{format_provider_error, run_connection_test, ConnectionTestResult, ProviderStatus};

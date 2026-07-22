@@ -43,9 +43,7 @@ fn select_thread_provider_model_should_persist_per_thread() {
 #[test]
 fn list_available_provider_models_should_return_vec_without_panic() {
     let (_temp, shell) = open_shell();
-    let listed = shell
-        .list_available_provider_models()
-        .expect("list models");
+    let listed = shell.list_available_provider_models().expect("list models");
     // Environment-dependent: just assert the API is callable and well-formed.
     for (provider, models) in &listed {
         assert!(provider == "ollama" || provider == "openai");

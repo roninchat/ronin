@@ -2,9 +2,7 @@
 
 use gpui::{rgb, WindowAppearance};
 use ronin::quick_mode::resolve_quick_overlay_theme;
-use ronin::theme::{
-    color_scheme_from_appearance, resolve_shell_theme, M0Theme, ThemeTokens,
-};
+use ronin::theme::{color_scheme_from_appearance, resolve_shell_theme, M0Theme, ThemeTokens};
 use ronin_core::{ColorScheme, ThemePreference};
 
 #[test]

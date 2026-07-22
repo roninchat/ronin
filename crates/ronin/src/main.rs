@@ -7,12 +7,14 @@ use gpui::{
     TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions,
 };
 use ronin::{
+    acquire_instance,
     artifacts_panel::{
         artifact_kind_badge, artifact_preview_card, artifacts_empty_state,
         save_code_block_as_snippet_label, snippet_title_from_language, ArtifactsPanelState,
         ARTIFACT_KIND_BADGE,
     },
     attachment_preview::{preview_from_attachment, preview_from_draft, AttachmentPreview},
+    attachment_size::{AttachmentSizeWarnState, DEFAULT_ATTACHMENT_WARN_CHARS},
     completions,
     composer::ComposerEditor,
     composer_ingest::{
@@ -26,53 +28,51 @@ use ronin::{
         fill_level_color, project_context_indicator, ContextEstimateInput, ContextIndicator,
     },
     folder_attach::FolderAttachState,
-    attachment_size::{AttachmentSizeWarnState, DEFAULT_ATTACHMENT_WARN_CHARS},
-    keyboard_nav::{
-        shortcut_catalog, FocusRegion, KeyInput, KeyboardNavState, NavAction, ScrollDirection,
-    },
     global_search::{
         artifact_document, group_hits_by_kind, memory_document, search, thread_message_document,
         thread_title_document, SearchContentKind, SearchDatePreset, SearchDocument, SearchHit,
         SearchPanelState,
     },
+    instance_runtime_dir,
+    keyboard_nav::{
+        shortcut_catalog, FocusRegion, KeyInput, KeyboardNavState, NavAction, ScrollDirection,
+    },
     memory_management::{
         group_memory_cards, memory_context_indicator, MemoryListItem, MemoryManagementState,
         PROFILE_GROUP_LABEL,
     },
+    message_branches::{branch_nav_label, edit_draft_commit, MessageEditState},
     model_picker::{
         entries_from_listed_providers, format_capability_summary, group_entries_by_provider,
         open_picker_at_active, picker_row_colors, picker_row_tone, refresh_picker_entries,
         ModelPickerAction, ModelPickerEntry, ModelPickerKey, ModelPickerState, ModelProviderKind,
     },
-    parse_launch_intent, ronin_paths,
+    parse_launch_intent, plan_incoming_launch,
     provider_settings::{
         connection_test_is_success, format_connection_test_result, test_connection_button_label,
     },
+    ronin_paths,
     screenshot_capture::PortalOrFallbackScreenshotCapturer,
     theme::{resolve_shell_theme, M0Theme},
     thread_titles::{
         format_sidebar_thread_title, title_generation_status_label, ThreadRenameState,
-    },
-    message_branches::{
-        branch_nav_label, edit_draft_commit, MessageEditState,
     },
     visual_polish::{
         cursor_visible_at, elevation_style, empty_state, error_presentation, generating_label,
         streaming_motion, Elevation, EmptyStateContent, EmptyStateKind, ErrorKind,
         ErrorPresentation,
     },
-    LaunchIntent, LauncherError, InstancePrimary, acquire_instance, instance_runtime_dir,
-    plan_incoming_launch,
+    InstancePrimary, LaunchIntent, LauncherError,
 };
 use ronin_app::{
     format_provider_error, ProviderStatus, RoninAppError, RoninShell, ShellState, MAX_CHARS,
     MAX_MESSAGES,
 };
 use ronin_core::{
-    clipboard_attachment, parse_context_tools, read_file_attachment, screenshot_attachment,
-    list_folder_entries,
-    clamp_sidebar_width, ChatProvider, ContextAttachmentDraft, ContextToolRef, HttpOllamaProvider,
-    MessageRole, MessageStatus, ScreenshotCapturer, ThemePreference,
+    clamp_sidebar_width, clipboard_attachment, list_folder_entries, parse_context_tools,
+    read_file_attachment, screenshot_attachment, ChatProvider, ContextAttachmentDraft,
+    ContextToolRef, HttpOllamaProvider, MessageRole, MessageStatus, ScreenshotCapturer,
+    ThemePreference,
 };
 
 mod quick_overlay;
@@ -353,11 +353,7 @@ impl RoninWindow {
     }
 
     fn paste_dest_dir(&self) -> std::path::PathBuf {
-        self.shell
-            .session()
-            .paths()
-            .data_dir
-            .join("pasted-images")
+        self.shell.session().paths().data_dir.join("pasted-images")
     }
 
     fn apply_dropped_paths(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
@@ -568,13 +564,7 @@ impl RoninWindow {
                     .rounded_full()
                     .bg(theme.border_subtle)
                     .overflow_hidden()
-                    .child(
-                        div()
-                            .h_full()
-                            .w(px(bar_w))
-                            .rounded_full()
-                            .bg(color),
-                    ),
+                    .child(div().h_full().w(px(bar_w)).rounded_full().bg(color)),
             )
             .child(
                 div()
@@ -584,12 +574,7 @@ impl RoninWindow {
             );
 
         if let Some(omission) = indicator.omission_label {
-            row = row.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.text_muted)
-                    .child(omission),
-            );
+            row = row.child(div().text_xs().text_color(theme.text_muted).child(omission));
         }
 
         row
@@ -723,12 +708,7 @@ impl RoninWindow {
     }
 
     fn capture_screenshot_attachment(&self) -> Result<ContextAttachmentDraft, String> {
-        let dest_dir = self
-            .shell
-            .session()
-            .paths()
-            .data_dir
-            .join("screenshots");
+        let dest_dir = self.shell.session().paths().data_dir.join("screenshots");
         let path = self
             .screenshot_capturer
             .capture(&dest_dir)
@@ -833,17 +813,15 @@ impl RoninWindow {
                         .truncate()
                         .child(name.clone()),
                 )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.text_muted)
-                        .child(format!(
-                            "{mime_type}{}",
-                            size_bytes
-                                .map(|b| format!(" · {}", ronin::attachment_preview::format_size_bytes(b)))
-                                .unwrap_or_default()
-                        )),
-                )
+                .child(div().text_xs().text_color(theme.text_muted).child(format!(
+                        "{mime_type}{}",
+                        size_bytes
+                            .map(|b| format!(
+                                " · {}",
+                                ronin::attachment_preview::format_size_bytes(b)
+                            ))
+                            .unwrap_or_default()
+                    )))
             }
             AttachmentPreview::File {
                 name,
@@ -914,11 +892,7 @@ impl RoninWindow {
         }
     }
 
-    fn render_message_attachments(
-        &self,
-        message_id: &str,
-        theme: &M0Theme,
-    ) -> Option<gpui::Div> {
+    fn render_message_attachments(&self, message_id: &str, theme: &M0Theme) -> Option<gpui::Div> {
         let attachments = self.shell.session().list_attachments(message_id).ok()?;
         if attachments.is_empty() {
             return None;
@@ -1066,8 +1040,7 @@ impl RoninWindow {
     }
 
     fn dismiss_active_picker(&mut self) -> bool {
-        let Some(picker) =
-            detect_active_picker(self.composer.text(), self.composer.cursor())
+        let Some(picker) = detect_active_picker(self.composer.text(), self.composer.cursor())
         else {
             return false;
         };
@@ -1213,8 +1186,7 @@ impl RoninWindow {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
                 match item.at_kind() {
                     Some(AtAttachmentKind::Screenshot) => {
-                        self.composer
-                            .replace_range(picker.token_start, cursor, "");
+                        self.composer.replace_range(picker.token_start, cursor, "");
                         self.completion_index = 0;
                         self.picker_suppressed = None;
                         // Capture immediately (same as Screenshot button).
@@ -1222,23 +1194,21 @@ impl RoninWindow {
                             Ok(draft) => self.pending_attachments.push(draft),
                             Err(e) => self.attachment_errors.push(e),
                         }
-                        return true;
+                        true
                     }
                     Some(AtAttachmentKind::Clipboard) => {
-                        self.composer
-                            .replace_range(picker.token_start, cursor, "");
+                        self.composer.replace_range(picker.token_start, cursor, "");
                         self.completion_index = 0;
                         self.picker_suppressed = None;
                         match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                             Ok(text) => {
-                                self.pending_attachments
-                                    .push(clipboard_attachment(&text));
+                                self.pending_attachments.push(clipboard_attachment(&text));
                             }
                             Err(e) => self
                                 .attachment_errors
                                 .push(format!("failed to read clipboard: {e}")),
                         }
-                        return true;
+                        true
                     }
                     other => {
                         let replacement = match other {
@@ -1381,8 +1351,7 @@ impl RoninWindow {
                     shift,
                     alt: false,
                 };
-                let (consumed, action) =
-                    self.keyboard_nav.handle_key(input, self.thread_count());
+                let (consumed, action) = self.keyboard_nav.handle_key(input, self.thread_count());
                 if consumed {
                     self.apply_nav_action(action, window, cx);
                 }
@@ -1589,7 +1558,12 @@ impl RoninWindow {
         }
     }
 
-    fn begin_thread_rename(&mut self, thread_id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn begin_thread_rename(
+        &mut self,
+        thread_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let title = self
             .shell
             .state()
@@ -1598,7 +1572,8 @@ impl RoninWindow {
             .find(|t| t.id == thread_id)
             .map(|t| t.title.clone())
             .unwrap_or_else(|| "New Chat".to_string());
-        self.thread_rename.begin_rename(thread_id.to_string(), title.clone());
+        self.thread_rename
+            .begin_rename(thread_id.to_string(), title.clone());
         let mut editor = ComposerEditor::new();
         editor.set_font_metrics_from_rem(self.composer_rem);
         editor.set_container_width(self.sidebar_width.max(120.0) - 24.0);
@@ -1645,8 +1620,15 @@ impl RoninWindow {
         cx.notify();
     }
 
-    fn begin_message_edit(&mut self, message_id: &str, content: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.message_edit.begin_edit(message_id.to_string(), content.to_string());
+    fn begin_message_edit(
+        &mut self,
+        message_id: &str,
+        content: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.message_edit
+            .begin_edit(message_id.to_string(), content.to_string());
         let mut editor = ComposerEditor::new();
         editor.set_font_metrics_from_rem(self.composer_rem);
         editor.set_container_width(600.0);
@@ -1727,8 +1709,7 @@ impl RoninWindow {
                 if let Some(draft) = self.thread_rename.editing() {
                     let _ = draft; // keep state; draft synced on commit from editor
                 }
-                self.thread_rename
-                    .update_draft(editor.text().to_string());
+                self.thread_rename.update_draft(editor.text().to_string());
                 cx.notify();
             }
         }
@@ -1823,13 +1804,10 @@ impl RoninWindow {
     ) {
         let title = snippet_title_from_language(language.as_deref());
         let lang = language.unwrap_or_default();
-        if let Err(e) = self.shell.create_snippet_artifact(
-            &thread_id,
-            &message_id,
-            &title,
-            &content,
-            &lang,
-        ) {
+        if let Err(e) =
+            self.shell
+                .create_snippet_artifact(&thread_id, &message_id, &title, &content, &lang)
+        {
             tracing::error!(%e, "failed to save snippet artifact");
         } else {
             self.artifacts_panel_open = true;
@@ -2092,8 +2070,7 @@ impl RoninWindow {
         };
 
         // Global focus / help chords (work from any region; Ctrl+B remains collapse)
-        let global_nav = input.control
-            && matches!(input.key, "1" | "2" | "3" | "/" | "?" | "f")
+        let global_nav = input.control && matches!(input.key, "1" | "2" | "3" | "/" | "?" | "f")
             || (input.key == "escape"
                 && (self.keyboard_nav.help_visible() || self.search_panel.is_open()));
         if global_nav {
@@ -2194,12 +2171,7 @@ impl RoninWindow {
         cx.notify();
     }
 
-    fn apply_nav_action(
-        &mut self,
-        action: NavAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_nav_action(&mut self, action: NavAction, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             NavAction::None | NavAction::ThreadHighlightChanged { .. } | NavAction::ToggleHelp => {
                 cx.notify();
@@ -2445,12 +2417,7 @@ impl RoninWindow {
                     .child(content.body),
             );
         if let Some(hint) = content.action_hint {
-            block = block.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.accent)
-                    .child(hint),
-            );
+            block = block.child(div().text_xs().text_color(theme.accent).child(hint));
         }
         block
     }
@@ -2497,17 +2464,17 @@ impl RoninWindow {
                     .child(err.message.clone()),
             );
         if let Some(hint) = err.action_hint {
-            block = block.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.accent)
-                    .child(hint),
-            );
+            block = block.child(div().text_xs().text_color(theme.accent).child(hint));
         }
         block
     }
 
-    fn render_sidebar(&mut self, theme: &M0Theme, sidebar_focused: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(
+        &mut self,
+        theme: &M0Theme,
+        sidebar_focused: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         if self.sidebar_collapsed {
             let focus_border = if sidebar_focused {
                 theme.accent
@@ -2572,15 +2539,13 @@ impl RoninWindow {
 
         let mut thread_list = div().flex().flex_col().gap_2().min_w_0().w_full();
         if threads_empty {
-            thread_list = thread_list.child(self.render_empty_state(
-                empty_state(EmptyStateKind::NoThreads),
-                theme,
-            ));
+            thread_list = thread_list
+                .child(self.render_empty_state(empty_state(EmptyStateKind::NoThreads), theme));
         } else {
             for (index, thread) in threads.iter().enumerate() {
                 let is_selected = Some(thread.id.as_str()) == selected_thread_id.as_deref();
-                let is_highlighted = sidebar_focused
-                    && self.keyboard_nav.thread_highlight() == Some(index);
+                let is_highlighted =
+                    sidebar_focused && self.keyboard_nav.thread_highlight() == Some(index);
                 let thread_id = thread.id.clone();
                 let is_generating = generating_ids.iter().any(|id| id == &thread_id);
                 let is_renaming = self
@@ -2858,15 +2823,13 @@ impl RoninWindow {
                             .mb_2()
                             .child("Threads"),
                     )
-                    .child(if let Some(hint) = title_generation_status_label(title_generating) {
-                        div()
-                            .text_xs()
-                            .text_color(theme.accent)
-                            .mb_2()
-                            .child(hint)
-                    } else {
-                        div()
-                    })
+                    .child(
+                        if let Some(hint) = title_generation_status_label(title_generating) {
+                            div().text_xs().text_color(theme.accent).mb_2().child(hint)
+                        } else {
+                            div()
+                        },
+                    )
                     .child(thread_list)
                     .child(if truncation_notice {
                         div()
@@ -3011,14 +2974,9 @@ impl RoninWindow {
         let messages = match messages_opt {
             Some(msgs) if !msgs.is_empty() => msgs.clone(),
             _ => {
-                return div()
-                    .flex_1()
-                    .p_6()
-                    .id("empty-messages")
-                    .child(self.render_empty_state(
-                        empty_state(EmptyStateKind::EmptyThread),
-                        theme,
-                    ));
+                return div().flex_1().p_6().id("empty-messages").child(
+                    self.render_empty_state(empty_state(EmptyStateKind::EmptyThread), theme),
+                );
             }
         };
 
@@ -3040,318 +2998,440 @@ impl RoninWindow {
                 if max.height > px(0.0) {
                     let frac = idx as f32 / visible_ids.len().max(1) as f32;
                     let new_y = (-max.height * frac).clamp(-max.height, px(0.0));
-                    self.message_scroll_handle
-                        .set_offset(point(px(0.0), new_y));
+                    self.message_scroll_handle.set_offset(point(px(0.0), new_y));
                 }
             }
         }
 
-        let message_elements: Vec<_> = messages.into_iter().filter_map(|msg| {
-            if msg.role == MessageRole::System {
-                return None;
-            }
-            let (label, bg) = match msg.role {
-                MessageRole::User => ("You", theme.surface_muted),
-                MessageRole::Assistant => ("Assistant", theme.surface_selected),
-                MessageRole::System => unreachable!(),
-            };
-            let is_search_match = scroll_target.as_deref() == Some(msg.id.as_str());
-            let raw_content = msg.content.clone();
-            let is_copied = self.copied_state.as_ref().map(|(id, _)| id) == Some(&msg.id);
-            let copy_text = if is_copied { "Copied!" } else { "Copy" };
-            let editing_this = self
-                .message_edit
-                .editing()
-                .map(|d| d.message_id == msg.id)
-                .unwrap_or(false);
-            let mut message_body = div().w_full().min_w_0().flex().flex_col().gap_3();
-
-            if !editing_this {
-            let blocks = if let Some((len, cached_blocks)) = self.parsed_messages.get(&msg.id) {
-                if *len == msg.content.len() {
-                    Some(cached_blocks.clone())
-                } else {
-                    None
+        let message_elements: Vec<_> = messages
+            .into_iter()
+            .filter_map(|msg| {
+                if msg.role == MessageRole::System {
+                    return None;
                 }
-            } else {
-                None
-            };
-            let blocks = blocks.unwrap_or_else(|| {
-                let parsed = ronin::markdown::parse_markdown(&msg.content);
-                self.parsed_messages
-                    .insert(msg.id.clone(), (msg.content.len(), parsed.clone()));
-                parsed
-            });
+                let (label, bg) = match msg.role {
+                    MessageRole::User => ("You", theme.surface_muted),
+                    MessageRole::Assistant => ("Assistant", theme.surface_selected),
+                    MessageRole::System => unreachable!(),
+                };
+                let is_search_match = scroll_target.as_deref() == Some(msg.id.as_str());
+                let raw_content = msg.content.clone();
+                let is_copied = self.copied_state.as_ref().map(|(id, _)| id) == Some(&msg.id);
+                let copy_text = if is_copied { "Copied!" } else { "Copy" };
+                let editing_this = self
+                    .message_edit
+                    .editing()
+                    .map(|d| d.message_id == msg.id)
+                    .unwrap_or(false);
+                let mut message_body = div().w_full().min_w_0().flex().flex_col().gap_3();
 
-            for (block_idx, block) in blocks.into_iter().enumerate() {
-                let block_el = match block {
-                    ronin::markdown::MarkdownBlock::Paragraph(inlines) => {
-                        ronin::markdown_view::render_inline_flow(&inlines, theme)
-                    }
-                    ronin::markdown::MarkdownBlock::CodeBlock { language, content } => {
-                        let lang_label = language
-                            .clone()
-                            .filter(|l| !l.is_empty())
-                            .unwrap_or_else(|| "text".to_string());
-                        let code_lines = ronin::markdown_view::render_highlighted_code_lines(
-                            language.as_deref(),
-                            &content,
-                            theme,
-                        )
-                        .id(gpui::SharedString::from(format!(
-                            "{}-code-scroll-{}",
-                            msg.id, block_idx
-                        )))
-                        .overflow_x_scroll();
-                        let block_id = format!("{}-code-{}", msg.id, block_idx);
-                        let is_block_copied =
-                            self.copied_state.as_ref().map(|(id, _)| id) == Some(&block_id);
-                        let block_copy_text = if is_block_copied { "Copied!" } else { "Copy" };
-                        let code_content = content.clone();
-                        let code_language = language.clone();
-                        let save_thread_id = msg.thread_id.clone();
-                        let save_message_id = msg.id.clone();
-                        let header = div()
-                            .w_full()
-                            .flex()
-                            .flex_row()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.text_muted)
-                                    .child(lang_label),
-                            )
-                            .child(
-                                div()
+                if !editing_this {
+                    let blocks =
+                        if let Some((len, cached_blocks)) = self.parsed_messages.get(&msg.id) {
+                            if *len == msg.content.len() {
+                                Some(cached_blocks.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                    let blocks = blocks.unwrap_or_else(|| {
+                        let parsed = ronin::markdown::parse_markdown(&msg.content);
+                        self.parsed_messages
+                            .insert(msg.id.clone(), (msg.content.len(), parsed.clone()));
+                        parsed
+                    });
+
+                    for (block_idx, block) in blocks.into_iter().enumerate() {
+                        let block_el = match block {
+                            ronin::markdown::MarkdownBlock::Paragraph(inlines) => {
+                                ronin::markdown_view::render_inline_flow(&inlines, theme)
+                            }
+                            ronin::markdown::MarkdownBlock::CodeBlock { language, content } => {
+                                let lang_label = language
+                                    .clone()
+                                    .filter(|l| !l.is_empty())
+                                    .unwrap_or_else(|| "text".to_string());
+                                let code_lines =
+                                    ronin::markdown_view::render_highlighted_code_lines(
+                                        language.as_deref(),
+                                        &content,
+                                        theme,
+                                    )
+                                    .id(gpui::SharedString::from(format!(
+                                        "{}-code-scroll-{}",
+                                        msg.id, block_idx
+                                    )))
+                                    .overflow_x_scroll();
+                                let block_id = format!("{}-code-{}", msg.id, block_idx);
+                                let is_block_copied =
+                                    self.copied_state.as_ref().map(|(id, _)| id) == Some(&block_id);
+                                let block_copy_text =
+                                    if is_block_copied { "Copied!" } else { "Copy" };
+                                let code_content = content.clone();
+                                let code_language = language.clone();
+                                let save_thread_id = msg.thread_id.clone();
+                                let save_message_id = msg.id.clone();
+                                let header = div()
+                                    .w_full()
                                     .flex()
                                     .flex_row()
-                                    .gap_3()
+                                    .justify_between()
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(theme.accent)
-                                            .cursor_pointer()
-                                            .child(save_code_block_as_snippet_label())
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener({
-                                                    let save_thread_id = save_thread_id.clone();
-                                                    let save_message_id = save_message_id.clone();
-                                                    let code_content = code_content.clone();
-                                                    let code_language = code_language.clone();
-                                                    move |this, _, _, cx| {
-                                                        this.save_code_block_as_snippet(
-                                                            save_thread_id.clone(),
-                                                            save_message_id.clone(),
-                                                            code_language.clone(),
-                                                            code_content.clone(),
-                                                            cx,
-                                                        );
-                                                    }
-                                                }),
-                                            ),
+                                            .text_color(theme.text_muted)
+                                            .child(lang_label),
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .text_color(if is_block_copied {
-                                                theme.text_primary
-                                            } else {
-                                                theme.accent
-                                            })
-                                            .cursor_pointer()
-                                            .child(block_copy_text)
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener({
-                                                    let block_id = block_id.clone();
-                                                    let code_content = code_content.clone();
-                                                    move |this, _, _, cx| {
-                                                        this.copy_to_clipboard(
-                                                            block_id.clone(),
-                                                            code_content.clone(),
-                                                            cx,
-                                                        );
-                                                    }
-                                                }),
+                                            .flex()
+                                            .flex_row()
+                                            .gap_3()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(theme.accent)
+                                                    .cursor_pointer()
+                                                    .child(save_code_block_as_snippet_label())
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener({
+                                                            let save_thread_id =
+                                                                save_thread_id.clone();
+                                                            let save_message_id =
+                                                                save_message_id.clone();
+                                                            let code_content = code_content.clone();
+                                                            let code_language =
+                                                                code_language.clone();
+                                                            move |this, _, _, cx| {
+                                                                this.save_code_block_as_snippet(
+                                                                    save_thread_id.clone(),
+                                                                    save_message_id.clone(),
+                                                                    code_language.clone(),
+                                                                    code_content.clone(),
+                                                                    cx,
+                                                                );
+                                                            }
+                                                        }),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(if is_block_copied {
+                                                        theme.text_primary
+                                                    } else {
+                                                        theme.accent
+                                                    })
+                                                    .cursor_pointer()
+                                                    .child(block_copy_text)
+                                                    .on_mouse_down(
+                                                        MouseButton::Left,
+                                                        cx.listener({
+                                                            let block_id = block_id.clone();
+                                                            let code_content = code_content.clone();
+                                                            move |this, _, _, cx| {
+                                                                this.copy_to_clipboard(
+                                                                    block_id.clone(),
+                                                                    code_content.clone(),
+                                                                    cx,
+                                                                );
+                                                            }
+                                                        }),
+                                                    ),
                                             ),
-                                    ),
-                            );
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .bg(theme.surface_hover)
-                            .rounded_md()
-                            .p_3()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .shadow(elevation_style(Elevation::Low, theme.color_scheme).box_shadows())
-                            .child(header)
-                            .child(code_lines)
-                    }
-                    ronin::markdown::MarkdownBlock::List(items) => {
-                        let mut list_div =
-                            div().w_full().min_w_0().flex().flex_col().gap_1().pl_4();
-                        for item in items {
-                            let li_content =
-                                ronin::markdown_view::render_inline_flow(&item.inlines, theme);
-                            list_div = list_div.child(
+                                    );
                                 div()
                                     .w_full()
                                     .min_w_0()
+                                    .overflow_hidden()
+                                    .bg(theme.surface_hover)
+                                    .rounded_md()
+                                    .p_3()
                                     .flex()
-                                    .flex_row()
+                                    .flex_col()
                                     .gap_2()
-                                    .child(div().flex_shrink_0().child("•"))
-                                    .child(div().flex_1().min_w_0().child(li_content)),
-                            );
-                        }
-                        list_div
-                    }
-                };
-                message_body = message_body.child(block_el);
-            }
-
-            if let Some(attachments_row) = self.render_message_attachments(&msg.id, theme) {
-                message_body = message_body.child(attachments_row);
-            }
-            } // !editing_this
-
-            let is_last_assistant = Some(&msg.id) == last_assistant_id.as_ref();
-            let mut message_actions = div()
-                .flex()
-                .flex_row()
-                .gap_3()
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(if is_copied {
-                            theme.text_primary
-                        } else {
-                            theme.accent
-                        })
-                        .cursor_pointer()
-                        .child(copy_text)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener({
-                                let msg_id = msg.id.clone();
-                                let raw_content = raw_content.clone();
-                                move |this, _, _, cx| {
-                                    this.copy_to_clipboard(msg_id.clone(), raw_content.clone(), cx);
-                                }
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.accent)
-                        .cursor_pointer()
-                        .child("Save as memory")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener({
-                                let raw_content = raw_content.clone();
-                                move |this, _, _, cx| {
-                                    this.save_as_memory(raw_content.clone(), cx);
-                                }
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.accent)
-                        .cursor_pointer()
-                        .child("Save as artifact")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener({
-                                let thread_id = msg.thread_id.clone();
-                                let msg_id = msg.id.clone();
-                                let raw_content = raw_content.clone();
-                                move |this, _, _, cx| {
-                                    this.save_as_artifact(
-                                        thread_id.clone(),
-                                        msg_id.clone(),
-                                        raw_content.clone(),
-                                        cx,
+                                    .shadow(
+                                        elevation_style(Elevation::Low, theme.color_scheme)
+                                            .box_shadows(),
+                                    )
+                                    .child(header)
+                                    .child(code_lines)
+                            }
+                            ronin::markdown::MarkdownBlock::List(items) => {
+                                let mut list_div =
+                                    div().w_full().min_w_0().flex().flex_col().gap_1().pl_4();
+                                for item in items {
+                                    let li_content = ronin::markdown_view::render_inline_flow(
+                                        &item.inlines,
+                                        theme,
+                                    );
+                                    list_div = list_div.child(
+                                        div()
+                                            .w_full()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_row()
+                                            .gap_2()
+                                            .child(div().flex_shrink_0().child("•"))
+                                            .child(div().flex_1().min_w_0().child(li_content)),
                                     );
                                 }
-                            }),
-                        ),
-                );
-
-            if msg.role == MessageRole::User {
-                if editing_this {
-                    if let Some(editor) = self.message_edit_editor.as_mut() {
-                        editor.set_container_width(560.0);
-                        message_body = message_body.child(
-                            div()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(theme.accent)
-                                .bg(theme.composer_background)
-                                .p_2()
-                                .track_focus(&self.message_edit_focus)
-                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                                    if event.keystroke.key.as_str() == "enter"
-                                        && event.keystroke.modifiers.control
-                                    {
-                                        this.commit_message_edit(cx);
-                                        return;
-                                    }
-                                    if event.keystroke.key.as_str() == "escape" {
-                                        this.cancel_message_edit(cx);
-                                        return;
-                                    }
-                                    if let Some(ed) = this.message_edit_editor.as_mut() {
-                                        if ed.on_key_down(event) {
-                                            this.message_edit.update_draft(ed.text().to_string());
-                                            cx.notify();
-                                        }
-                                    }
-                                }))
-                                .child(editor.render_text(
-                                    "Edit message",
-                                    theme.text_primary,
-                                    theme.text_muted,
-                                    theme.accent,
-                                )),
-                        );
-                        message_actions = message_actions
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.accent)
-                                    .cursor_pointer()
-                                    .child("Save & regenerate")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.commit_message_edit(cx);
-                                        }),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.text_muted)
-                                    .cursor_pointer()
-                                    .child("Cancel")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            this.cancel_message_edit(cx);
-                                        }),
-                                    ),
-                            );
+                                list_div
+                            }
+                        };
+                        message_body = message_body.child(block_el);
                     }
-                } else {
+
+                    if let Some(attachments_row) = self.render_message_attachments(&msg.id, theme) {
+                        message_body = message_body.child(attachments_row);
+                    }
+                } // !editing_this
+
+                let is_last_assistant = Some(&msg.id) == last_assistant_id.as_ref();
+                let mut message_actions = div()
+                    .flex()
+                    .flex_row()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if is_copied {
+                                theme.text_primary
+                            } else {
+                                theme.accent
+                            })
+                            .cursor_pointer()
+                            .child(copy_text)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener({
+                                    let msg_id = msg.id.clone();
+                                    let raw_content = raw_content.clone();
+                                    move |this, _, _, cx| {
+                                        this.copy_to_clipboard(
+                                            msg_id.clone(),
+                                            raw_content.clone(),
+                                            cx,
+                                        );
+                                    }
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.accent)
+                            .cursor_pointer()
+                            .child("Save as memory")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener({
+                                    let raw_content = raw_content.clone();
+                                    move |this, _, _, cx| {
+                                        this.save_as_memory(raw_content.clone(), cx);
+                                    }
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.accent)
+                            .cursor_pointer()
+                            .child("Save as artifact")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener({
+                                    let thread_id = msg.thread_id.clone();
+                                    let msg_id = msg.id.clone();
+                                    let raw_content = raw_content.clone();
+                                    move |this, _, _, cx| {
+                                        this.save_as_artifact(
+                                            thread_id.clone(),
+                                            msg_id.clone(),
+                                            raw_content.clone(),
+                                            cx,
+                                        );
+                                    }
+                                }),
+                            ),
+                    );
+
+                if msg.role == MessageRole::User {
+                    if editing_this {
+                        if let Some(editor) = self.message_edit_editor.as_mut() {
+                            editor.set_container_width(560.0);
+                            message_body = message_body.child(
+                                div()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(theme.accent)
+                                    .bg(theme.composer_background)
+                                    .p_2()
+                                    .track_focus(&self.message_edit_focus)
+                                    .on_key_down(cx.listener(
+                                        |this, event: &KeyDownEvent, _, cx| {
+                                            if event.keystroke.key.as_str() == "enter"
+                                                && event.keystroke.modifiers.control
+                                            {
+                                                this.commit_message_edit(cx);
+                                                return;
+                                            }
+                                            if event.keystroke.key.as_str() == "escape" {
+                                                this.cancel_message_edit(cx);
+                                                return;
+                                            }
+                                            if let Some(ed) = this.message_edit_editor.as_mut() {
+                                                if ed.on_key_down(event) {
+                                                    this.message_edit
+                                                        .update_draft(ed.text().to_string());
+                                                    cx.notify();
+                                                }
+                                            }
+                                        },
+                                    ))
+                                    .child(editor.render_text(
+                                        "Edit message",
+                                        theme.text_primary,
+                                        theme.text_muted,
+                                        theme.accent,
+                                    )),
+                            );
+                            message_actions = message_actions
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.accent)
+                                        .cursor_pointer()
+                                        .child("Save & regenerate")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.commit_message_edit(cx);
+                                            }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.text_muted)
+                                        .cursor_pointer()
+                                        .child("Cancel")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.cancel_message_edit(cx);
+                                            }),
+                                        ),
+                                );
+                        }
+                    } else {
+                        message_actions = message_actions.child(
+                            div()
+                                .text_xs()
+                                .text_color(if is_generating {
+                                    theme.text_muted
+                                } else {
+                                    theme.accent
+                                })
+                                .cursor_pointer()
+                                .child("Edit")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener({
+                                        let msg_id = msg.id.clone();
+                                        let content = raw_content.clone();
+                                        move |this, _, window, cx| {
+                                            if !this.shell.is_generation_active() {
+                                                this.begin_message_edit(
+                                                    &msg_id, &content, window, cx,
+                                                );
+                                            }
+                                        }
+                                    }),
+                                ),
+                        );
+                    }
+                }
+
+                if let Ok(siblings) = self.shell.branch_siblings(&msg.thread_id, &msg.id) {
+                    if siblings.len() >= 2 {
+                        if let Some(idx) = siblings.iter().position(|s| s.id == msg.id) {
+                            let prev_id = if idx > 0 {
+                                Some(siblings[idx - 1].id.clone())
+                            } else {
+                                None
+                            };
+                            let next_id = siblings.get(idx + 1).map(|s| s.id.clone());
+                            let thread_id = msg.thread_id.clone();
+                            message_actions = message_actions
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.text_muted)
+                                        .child(branch_nav_label(idx, siblings.len())),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(if prev_id.is_some() {
+                                            theme.accent
+                                        } else {
+                                            theme.text_muted
+                                        })
+                                        .cursor_pointer()
+                                        .child("‹")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener({
+                                                let thread_id = thread_id.clone();
+                                                move |this, _, _, cx| {
+                                                    if let Some(id) = prev_id.clone() {
+                                                        this.switch_to_branch(&thread_id, &id, cx);
+                                                    }
+                                                }
+                                            }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(if next_id.is_some() {
+                                            theme.accent
+                                        } else {
+                                            theme.text_muted
+                                        })
+                                        .cursor_pointer()
+                                        .child("›")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener({
+                                                let thread_id = thread_id.clone();
+                                                move |this, _, _, cx| {
+                                                    if let Some(id) = next_id.clone() {
+                                                        this.switch_to_branch(&thread_id, &id, cx);
+                                                    }
+                                                }
+                                            }),
+                                        ),
+                                );
+                        }
+                    }
+                }
+
+                if msg.role == MessageRole::Assistant
+                    && (msg.status == ronin_core::MessageStatus::Failed
+                        || msg.status == ronin_core::MessageStatus::Error)
+                {
+                    let detail = msg
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "The response stream was interrupted.".to_string());
+                    let err = error_presentation(ErrorKind::StreamFailure, &detail);
+                    message_body = message_body.child(self.render_error_presentation(&err, theme));
                     message_actions = message_actions.child(
                         div()
                             .text_xs()
@@ -3361,173 +3441,66 @@ impl RoninWindow {
                                 theme.accent
                             })
                             .cursor_pointer()
-                            .child("Edit")
+                            .child("Retry")
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener({
                                     let msg_id = msg.id.clone();
-                                    let content = raw_content.clone();
-                                    move |this, _, window, cx| {
+                                    move |this, _, _, cx| {
                                         if !this.shell.is_generation_active() {
-                                            this.begin_message_edit(
-                                                &msg_id,
-                                                &content,
-                                                window,
-                                                cx,
-                                            );
+                                            this.retry_failed_message(msg_id.clone(), cx);
                                         }
                                     }
                                 }),
                             ),
                     );
                 }
-            }
 
-            if let Ok(siblings) = self.shell.branch_siblings(&msg.thread_id, &msg.id) {
-                if siblings.len() >= 2 {
-                    if let Some(idx) = siblings.iter().position(|s| s.id == msg.id) {
-                        let prev_id = if idx > 0 {
-                            Some(siblings[idx - 1].id.clone())
-                        } else {
-                            None
-                        };
-                        let next_id = siblings.get(idx + 1).map(|s| s.id.clone());
-                        let thread_id = msg.thread_id.clone();
-                        message_actions = message_actions
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.text_muted)
-                                    .child(branch_nav_label(idx, siblings.len())),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(if prev_id.is_some() {
-                                        theme.accent
-                                    } else {
-                                        theme.text_muted
-                                    })
-                                    .cursor_pointer()
-                                    .child("‹")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener({
-                                            let thread_id = thread_id.clone();
-                                            move |this, _, _, cx| {
-                                                if let Some(id) = prev_id.clone() {
-                                                    this.switch_to_branch(&thread_id, &id, cx);
-                                                }
-                                            }
-                                        }),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(if next_id.is_some() {
-                                        theme.accent
-                                    } else {
-                                        theme.text_muted
-                                    })
-                                    .cursor_pointer()
-                                    .child("›")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener({
-                                            let thread_id = thread_id.clone();
-                                            move |this, _, _, cx| {
-                                                if let Some(id) = next_id.clone() {
-                                                    this.switch_to_branch(&thread_id, &id, cx);
-                                                }
-                                            }
-                                        }),
-                                    ),
-                            );
-                    }
-                }
-            }
-
-            if msg.role == MessageRole::Assistant
-                && (msg.status == ronin_core::MessageStatus::Failed
-                    || msg.status == ronin_core::MessageStatus::Error)
-            {
-                let detail = msg
-                    .error_message
-                    .clone()
-                    .unwrap_or_else(|| "The response stream was interrupted.".to_string());
-                let err = error_presentation(ErrorKind::StreamFailure, &detail);
-                message_body = message_body.child(self.render_error_presentation(&err, theme));
-                message_actions = message_actions.child(
-                    div()
-                        .text_xs()
-                        .text_color(if is_generating {
-                            theme.text_muted
-                        } else {
-                            theme.accent
-                        })
-                        .cursor_pointer()
-                        .child("Retry")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener({
-                                let msg_id = msg.id.clone();
-                                move |this, _, _, cx| {
-                                    if !this.shell.is_generation_active() {
-                                        this.retry_failed_message(msg_id.clone(), cx);
-                                    }
-                                }
-                            }),
-                        ),
-                );
-            }
-
-            if is_last_assistant
-                && (msg.status == ronin_core::MessageStatus::Complete
-                    || msg.status == ronin_core::MessageStatus::Cancelled)
-            {
-                message_actions = message_actions.child(
-                    div()
-                        .text_xs()
-                        .text_color(if is_generating {
-                            theme.text_muted
-                        } else {
-                            theme.accent
-                        })
-                        .cursor_pointer()
-                        .child("Regenerate")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener({
-                                move |this, _, _, cx| {
-                                    if !this.shell.is_generation_active() {
-                                        this.regenerate_last_assistant(cx);
-                                    }
-                                }
-                            }),
-                        ),
-                );
-            }
-
-            Some(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .mb_4()
-                    .child(
+                if is_last_assistant
+                    && (msg.status == ronin_core::MessageStatus::Complete
+                        || msg.status == ronin_core::MessageStatus::Cancelled)
+                {
+                    message_actions = message_actions.child(
                         div()
-                            .w_full()
-                            .flex()
-                            .flex_row()
-                            .justify_between()
-                            .mb_1()
-                            .child(div().text_xs().text_color(theme.text_muted).child(label))
-                            .child(message_actions),
-                    )
-                    .child(
-                        {
+                            .text_xs()
+                            .text_color(if is_generating {
+                                theme.text_muted
+                            } else {
+                                theme.accent
+                            })
+                            .cursor_pointer()
+                            .child("Regenerate")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener({
+                                    move |this, _, _, cx| {
+                                        if !this.shell.is_generation_active() {
+                                            this.regenerate_last_assistant(cx);
+                                        }
+                                    }
+                                }),
+                            ),
+                    );
+                }
+
+                Some(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .mb_4()
+                        .child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_row()
+                                .justify_between()
+                                .mb_1()
+                                .child(div().text_xs().text_color(theme.text_muted).child(label))
+                                .child(message_actions),
+                        )
+                        .child({
                             let mut bubble = div()
                                 .w_full()
                                 .min_w_0()
@@ -3541,11 +3514,10 @@ impl RoninWindow {
                                 bubble = bubble.border_2().border_color(theme.accent);
                             }
                             bubble.child(message_body)
-                        },
-                    ),
-            )
-        })
-        .collect();
+                        }),
+                )
+            })
+            .collect();
 
         let mut container = div()
             .flex_1()
@@ -3682,7 +3654,6 @@ impl RoninWindow {
                 for entry in folder.listing().entries.iter().take(40) {
                     let rel = entry.relative_path.clone();
                     let selected = folder.is_selected(&rel);
-                    let folder_idx = folder_idx;
                     panel = panel.child(
                         div()
                             .flex()
@@ -3737,12 +3708,7 @@ impl RoninWindow {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.text_primary)
-                            .child(msg),
-                    )
+                    .child(div().text_xs().text_color(theme.text_primary).child(msg))
                     .child(
                         div()
                             .flex()
@@ -4019,18 +3985,19 @@ impl RoninWindow {
             self.composer.text(),
             self.composer.cursor(),
         ) {
-            composer = composer.child(
-                div()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme.border_subtle)
-                    .bg(theme.surface_muted)
-                    .shadow(elevation_style(Elevation::Low, theme.color_scheme).box_shadows())
-                    .child(self.render_empty_state(
-                        empty_state(EmptyStateKind::NoSearchResults),
-                        theme,
-                    )),
-            );
+            composer =
+                composer.child(
+                    div()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(theme.border_subtle)
+                        .bg(theme.surface_muted)
+                        .shadow(elevation_style(Elevation::Low, theme.color_scheme).box_shadows())
+                        .child(self.render_empty_state(
+                            empty_state(EmptyStateKind::NoSearchResults),
+                            theme,
+                        )),
+                );
         }
 
         // Auto-scroll: only follow cursor when on the last visual line
@@ -4060,7 +4027,9 @@ impl RoninWindow {
                         .track_scroll(&self.composer_scroll_handle)
                         .max_h(px(max_input_h))
                         .cursor_text()
-                        .shadow(elevation_style(Elevation::Medium, theme.color_scheme).box_shadows())
+                        .shadow(
+                            elevation_style(Elevation::Medium, theme.color_scheme).box_shadows(),
+                        )
                         .track_focus(&self.composer_focus)
                         .on_key_down(cx.listener(Self::on_composer_key_down))
                         .on_mouse_down(MouseButton::Left, cx.listener(Self::on_composer_mouse_down))
@@ -4130,10 +4099,8 @@ impl RoninWindow {
             .w_full()
             .h_full();
         if grouped.is_empty() {
-            list = list.child(self.render_empty_state(
-                empty_state(EmptyStateKind::NoMemories),
-                theme,
-            ));
+            list =
+                list.child(self.render_empty_state(empty_state(EmptyStateKind::NoMemories), theme));
         }
         for (group, cards) in grouped {
             list = list.child(
@@ -4286,7 +4253,9 @@ impl RoninWindow {
                                             let id = id.clone();
                                             move |this, _, _, cx| {
                                                 this.shell
-                                                    .delete_memory(&ronin_core::MemoryId(id.clone()))
+                                                    .delete_memory(&ronin_core::MemoryId(
+                                                        id.clone(),
+                                                    ))
                                                     .ok();
                                                 cx.notify();
                                             }
@@ -4356,9 +4325,7 @@ impl RoninWindow {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
-                                    this.shell
-                                        .create_memory("New memory", "Add details…")
-                                        .ok();
+                                    this.shell.create_memory("New memory", "Add details…").ok();
                                     cx.notify();
                                 }),
                             ),
@@ -4465,14 +4432,8 @@ impl RoninWindow {
             .map(|art| artifact_preview_card(art, &thread_title(&art.thread_id)))
             .collect();
         let empty = artifacts_empty_state(&cards);
-        let pending_delete = self
-            .artifacts_panel
-            .pending_delete_id()
-            .map(str::to_string);
-        let editing_id = self
-            .artifacts_panel
-            .editing()
-            .map(|d| d.id.clone());
+        let pending_delete = self.artifacts_panel.pending_delete_id().map(str::to_string);
+        let editing_id = self.artifacts_panel.editing().map(|d| d.id.clone());
 
         let mut list = div()
             .flex()
@@ -4484,19 +4445,15 @@ impl RoninWindow {
             .h_full();
 
         if let Some(_empty_msg) = empty {
-            list = list.child(self.render_empty_state(
-                empty_state(EmptyStateKind::NoArtifacts),
-                theme,
-            ));
+            list = list
+                .child(self.render_empty_state(empty_state(EmptyStateKind::NoArtifacts), theme));
         }
 
         for card in &cards {
             let id = card.id.clone();
             let title = card.title.clone();
             let artifact = artifacts.iter().find(|a| a.id.0 == card.id);
-            let content = artifact
-                .map(|a| a.content.clone())
-                .unwrap_or_default();
+            let content = artifact.map(|a| a.content.clone()).unwrap_or_default();
             let is_snippet = artifact.is_some_and(|a| a.is_snippet());
             let language = artifact.and_then(|a| a.language.clone());
             let badge = artifact
@@ -4543,7 +4500,10 @@ impl RoninWindow {
                     &content,
                     theme,
                 )
-                .id(gpui::SharedString::from(format!("artifact-code-{}", card.id)))
+                .id(gpui::SharedString::from(format!(
+                    "artifact-code-{}",
+                    card.id
+                )))
                 .max_h(px(160.0))
                 .overflow_y_scroll();
                 card_el = card_el.child(
@@ -4818,11 +4778,7 @@ impl RoninWindow {
             .child(list)
     }
 
-    fn render_search_panel(
-        &mut self,
-        theme: &M0Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_search_panel(&mut self, theme: &M0Theme, cx: &mut Context<Self>) -> impl IntoElement {
         self.search_query_editor
             .set_font_metrics_from_rem(self.composer_rem);
         self.search_query_editor.set_container_width(440.0);
@@ -4842,10 +4798,7 @@ impl RoninWindow {
         let hits = self.current_search_hits();
         let selected = self.search_panel.selected();
         let corpus = self.build_search_corpus();
-        let mut providers: Vec<String> = corpus
-            .iter()
-            .filter_map(|d| d.provider.clone())
-            .collect();
+        let mut providers: Vec<String> = corpus.iter().filter_map(|d| d.provider.clone()).collect();
         providers.sort();
         providers.dedup();
         let mut models: Vec<String> = corpus.iter().filter_map(|d| d.model.clone()).collect();
@@ -4908,12 +4861,18 @@ impl RoninWindow {
                 cx,
             ));
 
-        let mut provider_row = div().flex().flex_row().flex_wrap().gap_2().items_center().child(
-            div()
-                .text_xs()
-                .text_color(theme.text_muted)
-                .child("Provider:"),
-        );
+        let mut provider_row = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.text_muted)
+                    .child("Provider:"),
+            );
         let provider_all_active = filters.provider.is_none();
         provider_row = provider_row.child(
             div()
@@ -4970,12 +4929,13 @@ impl RoninWindow {
             );
         }
 
-        let mut model_row = div().flex().flex_row().flex_wrap().gap_2().items_center().child(
-            div()
-                .text_xs()
-                .text_color(theme.text_muted)
-                .child("Model:"),
-        );
+        let mut model_row = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_2()
+            .items_center()
+            .child(div().text_xs().text_color(theme.text_muted).child("Model:"));
         let model_all_active = filters.model.is_none();
         model_row = model_row.child(
             div()
@@ -5032,9 +4992,13 @@ impl RoninWindow {
             );
         }
 
-        let mut date_row = div().flex().flex_row().flex_wrap().gap_2().items_center().child(
-            div().text_xs().text_color(theme.text_muted).child("Date:"),
-        );
+        let mut date_row = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_2()
+            .items_center()
+            .child(div().text_xs().text_color(theme.text_muted).child("Date:"));
         for (label, preset) in [
             ("Any time", SearchDatePreset::Any),
             ("7 days", SearchDatePreset::Last7Days),
@@ -5256,11 +5220,7 @@ impl RoninWindow {
             )
     }
 
-    fn render_model_picker(
-        &self,
-        theme: &M0Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_model_picker(&self, theme: &M0Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.model_picker.selected();
         let scheme = theme.color_scheme;
         let grouped = group_entries_by_provider(&self.model_picker_entries);
@@ -5316,22 +5276,14 @@ impl RoninWindow {
                                 .flex()
                                 .flex_col()
                                 .gap_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(colors.text)
-                                        .child(label),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.text_muted)
-                                        .child(if caps.is_empty() {
-                                            entry.provider_label.to_string()
-                                        } else {
-                                            format!("{} · {}", entry.provider_label, caps)
-                                        }),
-                                ),
+                                .child(div().text_sm().text_color(colors.text).child(label))
+                                .child(div().text_xs().text_color(colors.text_muted).child(
+                                    if caps.is_empty() {
+                                        entry.provider_label.to_string()
+                                    } else {
+                                        format!("{} · {}", entry.provider_label, caps)
+                                    },
+                                )),
                         )
                         .on_mouse_down(
                             MouseButton::Left,
@@ -5401,11 +5353,7 @@ impl RoninWindow {
             )
     }
 
-    fn render_shortcut_help(
-        &self,
-        theme: &M0Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_shortcut_help(&self, theme: &M0Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows = div().flex().flex_col().gap_2().w_full();
         for hint in shortcut_catalog() {
             rows = rows.child(

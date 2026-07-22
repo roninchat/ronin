@@ -8,10 +8,7 @@ use tempfile::TempDir;
 #[test]
 fn default_log_dir_should_be_under_cache_ronin_logs() {
     let dir = default_log_dir(std::path::Path::new("/home/user/.cache"));
-    assert_eq!(
-        dir.to_string_lossy(),
-        "/home/user/.cache/ronin/logs"
-    );
+    assert_eq!(dir.to_string_lossy(), "/home/user/.cache/ronin/logs");
 }
 
 #[test]
@@ -38,7 +35,9 @@ fn rotating_writer_should_rotate_when_max_size_exceeded() {
 
     for i in 0..20 {
         writer
-            .append_line(&format!("safe diagnostic line number {i} with padding ----"))
+            .append_line(&format!(
+                "safe diagnostic line number {i} with padding ----"
+            ))
             .expect("append");
     }
 

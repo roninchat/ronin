@@ -5,8 +5,8 @@
 mod logging;
 
 pub use logging::{
-    default_log_dir, redact_log_text, FileLogOptions, RotatingLogWriter, DEFAULT_MAX_LOG_FILE_BYTES,
-    REDACTED_PLACEHOLDER,
+    default_log_dir, redact_log_text, FileLogOptions, RotatingLogWriter,
+    DEFAULT_MAX_LOG_FILE_BYTES, REDACTED_PLACEHOLDER,
 };
 
 use std::path::{Path, PathBuf};
@@ -726,7 +726,7 @@ impl RoninDb {
 
         if let Some(row) = rows.next().map_err(RoninDbError::GetArtifact)? {
             Ok(Some(
-                row_to_artifact(&row).map_err(RoninDbError::GetArtifact)?,
+                row_to_artifact(row).map_err(RoninDbError::GetArtifact)?,
             ))
         } else {
             Ok(None)
@@ -741,7 +741,7 @@ impl RoninDb {
             .map_err(RoninDbError::ListArtifacts)?;
 
         let artifacts = stmt
-            .query_map(params![thread_id], |row| row_to_artifact(row))
+            .query_map(params![thread_id], row_to_artifact)
             .map_err(RoninDbError::ListArtifacts)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(RoninDbError::ListArtifacts)?;
@@ -757,7 +757,7 @@ impl RoninDb {
             .map_err(RoninDbError::ListArtifacts)?;
 
         let artifacts = stmt
-            .query_map([], |row| row_to_artifact(row))
+            .query_map([], row_to_artifact)
             .map_err(RoninDbError::ListArtifacts)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(RoninDbError::ListArtifacts)?;
@@ -838,9 +838,7 @@ impl RoninDb {
         let mut rows = stmt.query(params![id]).map_err(RoninDbError::GetMemory)?;
 
         if let Some(row) = rows.next().map_err(RoninDbError::GetMemory)? {
-            Ok(Some(
-                map_memory_row(&row).map_err(RoninDbError::GetMemory)?,
-            ))
+            Ok(Some(map_memory_row(row).map_err(RoninDbError::GetMemory)?))
         } else {
             Ok(None)
         }
@@ -854,7 +852,7 @@ impl RoninDb {
             .map_err(RoninDbError::ListMemories)?;
 
         let memories = stmt
-            .query_map([], |row| map_memory_row(row))
+            .query_map([], map_memory_row)
             .map_err(RoninDbError::ListMemories)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(RoninDbError::ListMemories)?;
@@ -1104,9 +1102,7 @@ pub fn init_tracing_with(options: FileLogOptions) {
     TRACING_INIT.call_once(|| {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-        let stderr_layer = fmt::layer()
-            .with_ansi(true)
-            .with_writer(RedactingStderr);
+        let stderr_layer = fmt::layer().with_ansi(true).with_writer(RedactingStderr);
 
         if options.enabled {
             match RotatingLogWriter::open(&options.log_dir, options.max_file_bytes) {

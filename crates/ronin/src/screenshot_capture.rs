@@ -61,9 +61,9 @@ fn block_on_portal_screenshot() -> Result<String, ScreenshotError> {
 }
 
 fn uri_to_path(uri: &str) -> Result<PathBuf, ScreenshotError> {
-    let path = uri
-        .strip_prefix("file://")
-        .ok_or_else(|| ScreenshotError::CaptureFailed(format!("unexpected screenshot URI: {uri}")))?;
+    let path = uri.strip_prefix("file://").ok_or_else(|| {
+        ScreenshotError::CaptureFailed(format!("unexpected screenshot URI: {uri}"))
+    })?;
     let decoded = urlencoding_decode(path);
     Ok(PathBuf::from(decoded))
 }

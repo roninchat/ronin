@@ -63,10 +63,7 @@ fn memory_enabled_and_profile_should_persist() {
     db.set_memory_profile(&memory.id, true)
         .expect("mark profile");
 
-    let fetched = db
-        .get_memory(&memory.id)
-        .expect("get")
-        .expect("exists");
+    let fetched = db.get_memory(&memory.id).expect("get").expect("exists");
     assert!(!fetched.enabled);
     assert!(fetched.is_profile);
 

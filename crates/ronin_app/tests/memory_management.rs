@@ -61,7 +61,9 @@ fn enabled_profile_memory_should_be_injected_into_provider_context() {
         "enabled profile memory should appear in system context: {context_msgs:?}"
     );
     assert!(
-        !context_msgs.iter().any(|m| m.content.contains("not profile")),
+        !context_msgs
+            .iter()
+            .any(|m| m.content.contains("not profile")),
         "regular memories must not auto-inject"
     );
 }
@@ -72,9 +74,7 @@ fn disabled_profile_memory_should_be_excluded_from_provider_context() {
     let mem = shell
         .create_profile_memory("Secret", "should-not-appear")
         .expect("create profile");
-    shell
-        .set_memory_enabled(&mem.id, false)
-        .expect("disable");
+    shell.set_memory_enabled(&mem.id, false).expect("disable");
 
     let thread_id = shell.state().selected_thread_id.clone().expect("thread");
     let provider = CapturingProvider {
@@ -98,15 +98,9 @@ fn disabled_profile_memory_should_be_excluded_from_provider_context() {
 #[test]
 fn memory_enable_and_profile_flags_should_persist_via_shell() {
     let (temp, shell) = open_shell();
-    let mem = shell
-        .create_memory("Prefs", "tea")
-        .expect("create");
-    shell
-        .set_memory_profile(&mem.id, true)
-        .expect("profile");
-    shell
-        .set_memory_enabled(&mem.id, false)
-        .expect("disable");
+    let mem = shell.create_memory("Prefs", "tea").expect("create");
+    shell.set_memory_profile(&mem.id, true).expect("profile");
+    shell.set_memory_enabled(&mem.id, false).expect("disable");
 
     let paths = RoninPaths {
         config_dir: temp.path().join("config"),

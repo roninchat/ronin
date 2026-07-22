@@ -176,11 +176,7 @@ impl QuickModeState {
 }
 
 /// Builds a one-shot provider request for the quick overlay (no thread history).
-pub fn build_quick_chat_request(
-    question: &str,
-    model: &str,
-    system_prompt: &str,
-) -> ChatRequest {
+pub fn build_quick_chat_request(question: &str, model: &str, system_prompt: &str) -> ChatRequest {
     ChatRequest {
         model: model.to_string(),
         messages: vec![ChatMessage {

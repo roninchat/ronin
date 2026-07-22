@@ -22,8 +22,14 @@ fn session_with_toml(toml_content: &str) -> (TempDir, RoninSession) {
 
 #[test]
 fn clamp_sidebar_width_should_enforce_min_and_max() {
-    assert_eq!(clamp_sidebar_width(SIDEBAR_WIDTH_MIN - 40.0), SIDEBAR_WIDTH_MIN);
-    assert_eq!(clamp_sidebar_width(SIDEBAR_WIDTH_MAX + 120.0), SIDEBAR_WIDTH_MAX);
+    assert_eq!(
+        clamp_sidebar_width(SIDEBAR_WIDTH_MIN - 40.0),
+        SIDEBAR_WIDTH_MIN
+    );
+    assert_eq!(
+        clamp_sidebar_width(SIDEBAR_WIDTH_MAX + 120.0),
+        SIDEBAR_WIDTH_MAX
+    );
     assert_eq!(clamp_sidebar_width(320.0), 320.0);
 }
 

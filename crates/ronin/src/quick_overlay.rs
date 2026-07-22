@@ -158,10 +158,7 @@ impl QuickModeWindow {
         loop {
             match rx.try_recv() {
                 Ok(event) => {
-                    let done = matches!(
-                        event,
-                        QuickStreamEvent::Done | QuickStreamEvent::Error(_)
-                    );
+                    let done = matches!(event, QuickStreamEvent::Done | QuickStreamEvent::Error(_));
                     self.state.apply_stream_event(event);
                     if done {
                         still_active = false;
@@ -343,12 +340,7 @@ impl QuickModeWindow {
         }
     }
 
-    fn on_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         if key == "escape" {
             self.dismiss(window, cx);
@@ -357,23 +349,29 @@ impl QuickModeWindow {
         if matches!(self.state.phase(), QuickPhase::Streaming) {
             return;
         }
-        if key == "enter" && !event.keystroke.modifiers.shift {
-            if self.state.can_submit() || !self.composer.text().trim().is_empty() {
-                // Sync question from composer before submit.
-                self.state.set_question(self.composer.text().to_string());
-                if self.state.can_submit() {
-                    self.submit(cx);
-                    return;
-                }
+        if key == "enter"
+            && !event.keystroke.modifiers.shift
+            && (self.state.can_submit() || !self.composer.text().trim().is_empty())
+        {
+            // Sync question from composer before submit.
+            self.state.set_question(self.composer.text().to_string());
+            if self.state.can_submit() {
+                self.submit(cx);
+                return;
             }
         }
         if self.composer.on_key_down(event) {
-            if matches!(self.state.phase(), QuickPhase::Composing | QuickPhase::Complete | QuickPhase::Failed { .. }) {
+            if matches!(
+                self.state.phase(),
+                QuickPhase::Composing | QuickPhase::Complete | QuickPhase::Failed { .. }
+            ) {
                 // Editing after complete starts a fresh compose cycle on next submit.
                 if !matches!(self.state.phase(), QuickPhase::Streaming) {
                     let text = self.composer.text().to_string();
-                    if matches!(self.state.phase(), QuickPhase::Complete | QuickPhase::Failed { .. })
-                        && text != self.state.question()
+                    if matches!(
+                        self.state.phase(),
+                        QuickPhase::Complete | QuickPhase::Failed { .. }
+                    ) && text != self.state.question()
                     {
                         self.state.set_question(text);
                     }
@@ -482,12 +480,11 @@ impl Render for QuickModeWindow {
                                 QuickPhase::Composing if answer.is_empty() => div()
                                     .text_color(theme.text_muted)
                                     .child("Answer appears here…"),
-                                QuickPhase::Streaming => div()
-                                    .child(if answer.is_empty() {
-                                        "Thinking…".to_string()
-                                    } else {
-                                        answer
-                                    }),
+                                QuickPhase::Streaming => div().child(if answer.is_empty() {
+                                    "Thinking…".to_string()
+                                } else {
+                                    answer
+                                }),
                                 QuickPhase::Failed { .. } => div()
                                     .text_color(theme.accent)
                                     .child(error.unwrap_or_else(|| "Failed".into())),
@@ -561,12 +558,8 @@ impl Render for QuickModeWindow {
                             );
                         }
                         if let Some(msg) = status {
-                            actions = actions.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.text_muted)
-                                    .child(msg),
-                            );
+                            actions = actions
+                                .child(div().text_xs().text_color(theme.text_muted).child(msg));
                         }
                         actions
                     }),

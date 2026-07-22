@@ -66,7 +66,9 @@ fn shell_should_persist_persona_and_use_it_in_provider_requests() {
     let request = request.as_ref().expect("captured");
     assert_eq!(request.messages[0].role, "system");
     assert!(
-        request.messages[0].content.contains("Always answer in haiku."),
+        request.messages[0]
+            .content
+            .contains("Always answer in haiku."),
         "provider must receive custom persona: {}",
         request.messages[0].content
     );
@@ -123,9 +125,7 @@ fn shell_import_export_provider_config_should_not_touch_persona() {
         .expect("seed url");
 
     let path = temp.path().join("export.toml");
-    shell
-        .export_provider_config_to_file(&path)
-        .expect("export");
+    shell.export_provider_config_to_file(&path).expect("export");
 
     shell
         .set_persona(PersonaMode::Replace, "Changed after export")

@@ -25,7 +25,8 @@ fn redact_should_strip_password_token_and_secret_assignments() {
 
 #[test]
 fn redact_should_strip_prompt_and_message_content_fields() {
-    let input = r#"prompt="Tell me your secrets" content="User message body" message="hello there""#;
+    let input =
+        r#"prompt="Tell me your secrets" content="User message body" message="hello there""#;
     let out = redact_log_text(input);
     assert!(!out.contains("Tell me your secrets"), "{out}");
     assert!(!out.contains("User message body"), "{out}");
@@ -50,7 +51,10 @@ fn redact_should_strip_credentials_from_urls() {
     assert!(!out.contains("user:p@ss"), "{out}");
     assert!(!out.contains("sk-live-999"), "{out}");
     assert!(!out.contains("token=abc"), "{out}");
-    assert!(out.contains(REDACTED_PLACEHOLDER) || out.contains("api.example.com"), "{out}");
+    assert!(
+        out.contains(REDACTED_PLACEHOLDER) || out.contains("api.example.com"),
+        "{out}"
+    );
 }
 
 #[test]

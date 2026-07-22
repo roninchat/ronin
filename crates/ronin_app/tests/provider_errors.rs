@@ -63,8 +63,14 @@ fn openai_unreachable_error_should_be_actionable_without_ollama_copy() {
 fn invalid_model_error_should_suggest_checking_or_pulling() {
     let samples = [
         ("ollama", "model 'llama3.9' not found"),
-        ("ollama", "ollama returned 404: {\"error\":\"model 'foo' not found\"}"),
-        ("openai", "openai returned 404: The model `gpt-9` does not exist"),
+        (
+            "ollama",
+            "ollama returned 404: {\"error\":\"model 'foo' not found\"}",
+        ),
+        (
+            "openai",
+            "openai returned 404: The model `gpt-9` does not exist",
+        ),
         ("openai", "invalid_request_error: model_not_found"),
     ];
     for (provider, raw) in samples {
@@ -149,7 +155,9 @@ fn connection_test_should_succeed_when_provider_is_reachable_and_authenticated()
         ConnectionTestResult::Success { message } => {
             let lower = message.to_lowercase();
             assert!(lower.contains("success") || lower.contains("connected"));
-            assert!(lower.contains("ollama") || lower.contains("1 model") || lower.contains("model"));
+            assert!(
+                lower.contains("ollama") || lower.contains("1 model") || lower.contains("model")
+            );
         }
         ConnectionTestResult::Failure { message } => {
             panic!("expected success, got failure: {message}");
@@ -171,7 +179,9 @@ fn connection_test_should_fail_with_actionable_message_when_ollama_offline() {
             OllamaHealth::Offline
         }
         fn list_models(&self) -> Result<Vec<String>, ronin_core::RoninError> {
-            Err(ronin_core::RoninError::Provider("connection refused".into()))
+            Err(ronin_core::RoninError::Provider(
+                "connection refused".into(),
+            ))
         }
     }
 
@@ -180,7 +190,9 @@ fn connection_test_should_fail_with_actionable_message_when_ollama_offline() {
             let lower = message.to_lowercase();
             assert!(lower.contains("ollama"));
             assert!(lower.contains("not running") || lower.contains("offline"));
-            assert!(lower.contains("start") || lower.contains("install") || lower.contains("serve"));
+            assert!(
+                lower.contains("start") || lower.contains("install") || lower.contains("serve")
+            );
         }
         ConnectionTestResult::Success { message } => {
             panic!("expected failure, got success: {message}");
