@@ -346,3 +346,24 @@ fn extra_poll_disabled_short_circuits() {
         );
     }
 }
+
+#[test]
+fn extra_confirm_origin_after_each_propose() {
+    use ronin_core::{
+        confirmed_clipboard_attach_may_inject_into_chat_request, may_inject_into_chat_request,
+        ContextOrigin,
+    };
+    for i in 0..120usize {
+        let mut watch = ClipboardWatchController::new();
+        watch.enable(Some("x"));
+        watch.observe_text(&format!("extra-confirm-{i}"));
+        assert!(!may_inject_into_chat_request(
+            ContextOrigin::ClipboardWatchProposal
+        ));
+        assert!(watch.confirm_pending().is_some());
+        assert!(confirmed_clipboard_attach_may_inject_into_chat_request());
+        assert!(may_inject_into_chat_request(
+            ContextOrigin::ConfirmToAttachAccepted
+        ));
+    }
+}

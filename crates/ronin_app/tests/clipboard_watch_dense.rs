@@ -51,3 +51,46 @@ fn dense_shell_disabled_observe_matrix() {
         assert!(shell.pending_clipboard_attach_proposal().is_none());
     }
 }
+
+#[test]
+fn dense_shell_slash_seam_confirm_dismiss_cycles() {
+    for i in 0..80usize {
+        let (mut shell, _t) = open_shell();
+        shell
+            .set_clipboard_watch_enabled(true, Some("slash-base"))
+            .unwrap();
+        let text = format!("slash-seam-{i}");
+        assert_eq!(
+            shell.observe_clipboard_text(&text),
+            ClipboardObserveOutcome::Proposed
+        );
+        if i % 2 == 0 {
+            let draft = shell.confirm_clipboard_attach_proposal().unwrap();
+            assert_eq!(draft.content.as_deref(), Some(text.as_str()));
+            assert!(shell.confirm_clipboard_attach_proposal().is_none());
+        } else {
+            shell.dismiss_clipboard_attach_proposal();
+            assert!(shell.pending_clipboard_attach_proposal().is_none());
+        }
+    }
+}
+
+#[test]
+fn dense_shell_toggle_persists_and_clears() {
+    for i in 0..50usize {
+        let (mut shell, temp) = open_shell();
+        shell.set_clipboard_watch_enabled(true, Some("t")).unwrap();
+        shell.observe_clipboard_text(&format!("tog-{i}"));
+        assert!(shell.pending_clipboard_attach_proposal().is_some());
+        shell.set_clipboard_watch_enabled(false, None).unwrap();
+        assert!(!shell.clipboard_watch_enabled());
+        assert!(shell.pending_clipboard_attach_proposal().is_none());
+        drop(shell);
+        let paths = RoninPaths {
+            config_dir: temp.path().join("config"),
+            data_dir: temp.path().join("data"),
+        };
+        let reopened = RoninShell::open(paths).unwrap();
+        assert!(!reopened.clipboard_watch_enabled());
+    }
+}

@@ -255,3 +255,38 @@ fn stress_reenable_clears_old_proposal() {
         assert_eq!(watch.observe_text("e1"), ClipboardObserveOutcome::Unchanged);
     }
 }
+
+#[test]
+fn stress_toggle_disable_clears_like_slash() {
+    for i in 0..120usize {
+        let mut watch = ClipboardWatchController::new();
+        watch.enable(Some("slash-toggle"));
+        watch.observe_text(&format!("pending-slash-{i}"));
+        assert!(watch.pending_proposal().is_some());
+        // /clipboard-watch off
+        watch.disable();
+        assert!(!watch.is_enabled());
+        assert!(watch.pending_proposal().is_none());
+        assert_eq!(
+            watch.observe_text(&format!("after-off-{i}")),
+            ClipboardObserveOutcome::IgnoredDisabled
+        );
+    }
+}
+
+#[test]
+fn stress_reenable_via_prefs_like_slash_toggle() {
+    for i in 0..100usize {
+        let mut watch = ClipboardWatchController::new();
+        watch.apply_prefs(&ClipboardWatchPrefs { enabled: true }, Some("on"));
+        assert!(watch.is_enabled());
+        watch.observe_text(&format!("on-payload-{i}"));
+        assert!(watch.pending_proposal().is_some());
+        watch.apply_prefs(&ClipboardWatchPrefs { enabled: false }, None);
+        assert!(!watch.is_enabled());
+        assert!(watch.pending_proposal().is_none());
+        watch.apply_prefs(&ClipboardWatchPrefs { enabled: true }, Some("on2"));
+        assert!(watch.is_enabled());
+        assert!(watch.pending_proposal().is_none());
+    }
+}

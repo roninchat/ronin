@@ -418,3 +418,32 @@ fn pattern_ids_unique_across_long_session() {
     }
     assert_eq!(seen.len(), 100);
 }
+
+#[test]
+fn pattern_toggle_off_stops_like_slash_watch() {
+    for i in 0..100usize {
+        let mut watch = ClipboardWatchController::new();
+        watch.enable(Some("pat-on"));
+        watch.observe_text(&format!("pat-on-change-{i}"));
+        assert!(watch.pending_proposal().is_some());
+        watch.disable();
+        assert_eq!(
+            watch.observe_text(&format!("pat-off-{i}")),
+            ClipboardObserveOutcome::IgnoredDisabled
+        );
+        assert!(!clipboard_watch_proposal_may_inject_into_chat_request());
+    }
+}
+
+#[test]
+fn pattern_confirm_then_disable_stays_clean() {
+    for i in 0..80usize {
+        let mut watch = ClipboardWatchController::new();
+        watch.enable(Some("c"));
+        watch.observe_text(&format!("pat-c-{i}"));
+        assert!(watch.confirm_pending().is_some());
+        watch.disable();
+        assert!(watch.pending_proposal().is_none());
+        assert!(!watch.is_enabled());
+    }
+}

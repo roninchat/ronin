@@ -155,3 +155,19 @@ fn shell_confirm_none_when_no_proposal_matrix() {
         assert!(shell.pending_clipboard_attach_proposal().is_none());
     }
 }
+
+#[test]
+fn shell_toggle_enable_disable_many() {
+    for i in 0..70usize {
+        let (mut shell, _temp) = open_shell("");
+        shell
+            .set_clipboard_watch_enabled(true, Some("many"))
+            .unwrap();
+        assert!(shell.clipboard_watch_enabled());
+        shell.observe_clipboard_text(&format!("many-{i}"));
+        assert!(shell.pending_clipboard_attach_proposal().is_some());
+        shell.set_clipboard_watch_enabled(false, None).unwrap();
+        assert!(!shell.clipboard_watch_enabled());
+        assert!(shell.pending_clipboard_attach_proposal().is_none());
+    }
+}

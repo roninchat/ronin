@@ -119,3 +119,26 @@ fn slash_catalog_exposes_clipboard_watch_actions() {
     assert!(inserts.contains(&"/clipboard-confirm"));
     assert!(inserts.contains(&"/clipboard-dismiss"));
 }
+
+#[test]
+fn slash_action_filter_finds_clipboard_watch() {
+    use ronin::composer_pickers::{filter_picker_items, slash_action_catalog};
+    for q in ["clip", "clipboard", "confirm", "dismiss", "watch"] {
+        let filtered = filter_picker_items(slash_action_catalog(), q);
+        assert!(
+            !filtered.is_empty(),
+            "expected clipboard-watch slash hits for query {q}"
+        );
+    }
+}
+
+#[test]
+fn slash_tokens_stable_matrix() {
+    use ronin::composer_pickers::slash_action_catalog;
+    for _ in 0..40 {
+        let inserts: Vec<_> = slash_action_catalog().iter().map(|i| i.insert).collect();
+        assert!(inserts.contains(&"/clipboard-watch"));
+        assert!(inserts.contains(&"/clipboard-confirm"));
+        assert!(inserts.contains(&"/clipboard-dismiss"));
+    }
+}
