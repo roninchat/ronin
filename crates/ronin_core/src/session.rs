@@ -1,9 +1,15 @@
 //! Open Ronin application session backed by local filesystem state.
 
+use std::collections::HashMap;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ronin_db::{
-    default_log_dir, init_tracing_with, FileLogOptions, RoninDb, DEFAULT_MAX_LOG_FILE_BYTES,
+    default_log_dir, delete_workspace_lexical_store, init_tracing_with, DbWorkspaceIndexMeta,
+    FileLogOptions, LexicalIndexDocument, RoninDb, WorkspaceLexicalStore,
+    DEFAULT_MAX_LOG_FILE_BYTES,
 };
 
 use crate::config::{LoggingConfig, RoninConfig};
@@ -12,11 +18,20 @@ use crate::domain::{
     MessageRole, RoninPaths, Thread,
 };
 use crate::error::{Result, RoninError};
+use crate::trust::scrub_ambient_payload;
+use crate::workspace_index::{
+    clamp_workspace_index_search_limit, collect_workspace_index_documents,
+    workspace_index_hit_attachment, workspace_index_storage_path, WorkspaceIndexCaps,
+    WorkspaceIndexHit, WorkspaceIndexInfo, WorkspaceIndexPhase,
+    WORKSPACE_INDEX_SEARCH_DEFAULT_LIMIT, WORKSPACE_INDEX_STORAGE_DIR,
+};
 
 /// Open Ronin application session backed by local filesystem state.
 pub struct RoninSession {
     db: RoninDb,
     paths: RoninPaths,
+    /// Per-thread cancel flags for in-progress one-shot index builds.
+    index_cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 impl RoninSession {
@@ -67,7 +82,11 @@ impl RoninSession {
         tracing::info!(data_dir = %paths.data_dir.display(), "ronin data directory ready");
 
         let db = RoninDb::open(paths.data_dir.join("ronin.db"))?;
-        Ok(Self { db, paths })
+        Ok(Self {
+            db,
+            paths,
+            index_cancel_flags: Mutex::new(HashMap::new()),
+        })
     }
 
     /// Returns the filesystem paths for this session.
@@ -127,6 +146,427 @@ impl RoninSession {
         self.db
             .update_thread_model(thread_id, Some(model))
             .map_err(Into::into)
+    }
+
+    /// Returns the opt-in workspace root bound to a thread, if any.
+    pub fn thread_workspace_root(&self, thread_id: &str) -> Result<Option<std::path::PathBuf>> {
+        let root = self
+            .list_threads()?
+            .into_iter()
+            .find(|t| t.id == thread_id)
+            .and_then(|t| t.workspace_root);
+        Ok(root)
+    }
+
+    /// Binds an explicit workspace root to a thread (opt-in; never auto-detected).
+    ///
+    /// The path must be an existing directory. Stored as an absolute path.
+    /// Binding does not attach files or inject context into the model.
+    pub fn set_thread_workspace_root(
+        &self,
+        thread_id: &str,
+        root: impl AsRef<std::path::Path>,
+    ) -> Result<()> {
+        let root = root.as_ref();
+        let meta = std::fs::metadata(root).map_err(|_| RoninError::InvalidWorkspaceRoot {
+            path: root.to_path_buf(),
+        })?;
+        if !meta.is_dir() {
+            return Err(RoninError::InvalidWorkspaceRoot {
+                path: root.to_path_buf(),
+            });
+        }
+        let absolute = root.canonicalize().unwrap_or_else(|_| {
+            if root.is_absolute() {
+                root.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(root)
+            }
+        });
+        self.db
+            .update_thread_workspace_root(thread_id, Some(absolute.to_string_lossy().as_ref()))
+            .map_err(Into::into)
+    }
+
+    /// Clears the workspace root binding on a thread.
+    pub fn clear_thread_workspace_root(&self, thread_id: &str) -> Result<()> {
+        self.db
+            .update_thread_workspace_root(thread_id, None)
+            .map_err(Into::into)
+    }
+
+    /// Returns status for a thread's lexical workspace index (absent when none).
+    pub fn workspace_index_info(&self, thread_id: &str) -> Result<WorkspaceIndexInfo> {
+        Ok(match self.db.get_workspace_index_meta(thread_id)? {
+            Some(meta) => self.info_from_meta(meta),
+            None => WorkspaceIndexInfo::absent(),
+        })
+    }
+
+    /// Explicit one-shot “Index this workspace” build for a thread with a bound root.
+    ///
+    /// Does not start on session open. Never merges corpus into chat assembly.
+    pub fn build_workspace_index(&self, thread_id: &str) -> Result<WorkspaceIndexInfo> {
+        self.build_workspace_index_with_caps(thread_id, &WorkspaceIndexCaps::default())
+    }
+
+    /// Rebuilds the lexical index (same as build; replaces any prior corpus).
+    pub fn rebuild_workspace_index(&self, thread_id: &str) -> Result<WorkspaceIndexInfo> {
+        self.build_workspace_index(thread_id)
+    }
+
+    /// One-shot build with explicit caps (tests / host orchestration).
+    pub fn build_workspace_index_with_caps(
+        &self,
+        thread_id: &str,
+        caps: &WorkspaceIndexCaps,
+    ) -> Result<WorkspaceIndexInfo> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.build_workspace_index_cancellable(thread_id, caps, cancel)
+    }
+
+    /// Build that observes a shared cancel flag (cooperative cancel / host threads).
+    pub fn build_workspace_index_cancellable(
+        &self,
+        thread_id: &str,
+        caps: &WorkspaceIndexCaps,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<WorkspaceIndexInfo> {
+        {
+            let mut flags = self
+                .index_cancel_flags
+                .lock()
+                .map_err(|_| RoninError::WorkspaceIndexCancelLock)?;
+            flags.insert(thread_id.to_string(), Arc::clone(&cancel));
+        }
+        let result = self.run_workspace_index_build(thread_id, caps, &cancel);
+        {
+            let mut flags = self
+                .index_cancel_flags
+                .lock()
+                .map_err(|_| RoninError::WorkspaceIndexCancelLock)?;
+            flags.remove(thread_id);
+        }
+        result
+    }
+
+    /// Requests cancel of an in-progress index build for `thread_id`.
+    pub fn cancel_workspace_index(&self, thread_id: &str) -> Result<()> {
+        let flags = self
+            .index_cancel_flags
+            .lock()
+            .map_err(|_| RoninError::WorkspaceIndexCancelLock)?;
+        if let Some(flag) = flags.get(thread_id) {
+            flag.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
+    /// Deletes index metadata and on-disk lexical corpus for a thread.
+    pub fn delete_workspace_index(&self, thread_id: &str) -> Result<()> {
+        let storage = workspace_index_storage_path(&self.paths.data_dir, thread_id);
+        delete_workspace_lexical_store(&storage)?;
+        self.db.delete_workspace_index_meta(thread_id)?;
+        Ok(())
+    }
+
+    /// Absolute path where this thread's lexical index DB would live.
+    pub fn workspace_index_storage_path_for(&self, thread_id: &str) -> PathBuf {
+        workspace_index_storage_path(&self.paths.data_dir, thread_id)
+    }
+
+    /// Lexical search over a thread's indexed workspace. Returns candidates only.
+    ///
+    /// Requires a completed index. Does not attach or inject into chat assembly.
+    pub fn search_workspace_index(
+        &self,
+        thread_id: &str,
+        query: &str,
+    ) -> Result<Vec<WorkspaceIndexHit>> {
+        self.search_workspace_index_limited(thread_id, query, WORKSPACE_INDEX_SEARCH_DEFAULT_LIMIT)
+    }
+
+    /// Lexical search with an explicit hit limit (clamped).
+    pub fn search_workspace_index_limited(
+        &self,
+        thread_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<WorkspaceIndexHit>> {
+        let store = self.open_ready_workspace_index_store(thread_id)?;
+        let hits = store.search(query, clamp_workspace_index_search_limit(limit))?;
+        Ok(hits
+            .into_iter()
+            .map(|h| WorkspaceIndexHit {
+                relative_path: h.relative_path,
+                snippet: scrub_ambient_payload(&h.snippet),
+            })
+            .collect())
+    }
+
+    /// Build explicit attachment drafts for selected index hit paths.
+    ///
+    /// This is the attach gate: callers must pass paths the user chose. Bodies
+    /// come from the lexical store; missing paths are skipped.
+    pub fn attach_workspace_index_hits<P: AsRef<str>>(
+        &self,
+        thread_id: &str,
+        relative_paths: &[P],
+    ) -> Result<Vec<crate::ContextAttachmentDraft>> {
+        if relative_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let store = self.open_ready_workspace_index_store(thread_id)?;
+        let mut drafts = Vec::new();
+        for path in relative_paths {
+            let path = path.as_ref();
+            if let Some(body) = store.document_body(path)? {
+                drafts.push(workspace_index_hit_attachment(path, &body));
+            }
+        }
+        Ok(drafts)
+    }
+
+    fn open_ready_workspace_index_store(&self, thread_id: &str) -> Result<WorkspaceLexicalStore> {
+        let info = self.workspace_index_info(thread_id)?;
+        if info.phase != WorkspaceIndexPhase::Done {
+            return Err(RoninError::WorkspaceIndex(
+                "workspace index is not ready for search; build or rebuild first".into(),
+            ));
+        }
+        let storage = info.storage_path.ok_or_else(|| {
+            RoninError::WorkspaceIndex("workspace index has no storage path".into())
+        })?;
+        if !storage.exists() {
+            return Err(RoninError::WorkspaceIndex(
+                "workspace index store is missing; rebuild the index".into(),
+            ));
+        }
+        Ok(WorkspaceLexicalStore::open(&storage)?)
+    }
+
+    fn run_workspace_index_build(
+        &self,
+        thread_id: &str,
+        caps: &WorkspaceIndexCaps,
+        cancel: &AtomicBool,
+    ) -> Result<WorkspaceIndexInfo> {
+        let root = self.thread_workspace_root(thread_id)?.ok_or_else(|| {
+            RoninError::WorkspaceIndex(
+                "thread has no workspace root; set one before indexing".into(),
+            )
+        })?;
+
+        let storage = workspace_index_storage_path(&self.paths.data_dir, thread_id);
+        let storage_relpath = format!("{WORKSPACE_INDEX_STORAGE_DIR}/{thread_id}.db");
+        let now = unix_now_ms();
+        let prior_done = self
+            .db
+            .get_workspace_index_meta(thread_id)?
+            .filter(|m| m.phase == WorkspaceIndexPhase::Done.as_str());
+
+        self.db.upsert_workspace_index_meta(&DbWorkspaceIndexMeta {
+            thread_id: thread_id.to_string(),
+            phase: WorkspaceIndexPhase::Running.as_str().to_string(),
+            workspace_root: Some(root.to_string_lossy().into_owned()),
+            entry_count: 0,
+            byte_count: 0,
+            truncated: false,
+            error_message: None,
+            storage_relpath: Some(storage_relpath.clone()),
+            built_at: None,
+            updated_at: now,
+        })?;
+
+        let policy = self.folder_list_policy()?;
+        let collected = collect_workspace_index_documents(&root, &policy, caps, cancel);
+
+        if let Some(err) = collected.error_message {
+            let meta = DbWorkspaceIndexMeta {
+                thread_id: thread_id.to_string(),
+                phase: WorkspaceIndexPhase::Failed.as_str().to_string(),
+                workspace_root: Some(root.to_string_lossy().into_owned()),
+                entry_count: prior_done.as_ref().map(|p| p.entry_count).unwrap_or(0),
+                byte_count: prior_done.as_ref().map(|p| p.byte_count).unwrap_or(0),
+                truncated: false,
+                error_message: Some(err),
+                storage_relpath: Some(storage_relpath),
+                built_at: prior_done.as_ref().and_then(|p| p.built_at),
+                updated_at: unix_now_ms(),
+            };
+            self.db.upsert_workspace_index_meta(&meta)?;
+            // Leave any prior on-disk corpus untouched on failure.
+            return Ok(self.info_from_meta(meta));
+        }
+
+        if collected.cancelled {
+            let (entry_count, byte_count, storage, built_at) = match prior_done {
+                Some(p) => (p.entry_count, p.byte_count, p.storage_relpath, p.built_at),
+                None => (0, 0, Some(storage_relpath.clone()), None),
+            };
+            let meta = DbWorkspaceIndexMeta {
+                thread_id: thread_id.to_string(),
+                phase: WorkspaceIndexPhase::Cancelled.as_str().to_string(),
+                workspace_root: Some(root.to_string_lossy().into_owned()),
+                entry_count,
+                byte_count,
+                truncated: true,
+                error_message: None,
+                storage_relpath: storage,
+                built_at,
+                updated_at: unix_now_ms(),
+            };
+            self.db.upsert_workspace_index_meta(&meta)?;
+            // Do not replace on-disk corpus on cancel — preserve prior Done index.
+            return Ok(self.info_from_meta(meta));
+        }
+
+        let byte_count = collected.byte_count;
+        let truncated = collected.truncated;
+        let docs: Vec<LexicalIndexDocument> = collected
+            .documents
+            .into_iter()
+            .map(|d| LexicalIndexDocument {
+                relative_path: d.relative_path,
+                body: d.body,
+                byte_len: d.byte_len,
+            })
+            .collect();
+
+        let store = WorkspaceLexicalStore::open(&storage)?;
+        store.replace_documents(&docs)?;
+
+        let built_at = unix_now_ms();
+        let meta = DbWorkspaceIndexMeta {
+            thread_id: thread_id.to_string(),
+            phase: WorkspaceIndexPhase::Done.as_str().to_string(),
+            workspace_root: Some(root.to_string_lossy().into_owned()),
+            entry_count: docs.len() as i64,
+            byte_count: byte_count as i64,
+            truncated,
+            error_message: None,
+            storage_relpath: Some(storage_relpath),
+            built_at: Some(built_at),
+            updated_at: built_at,
+        };
+        self.db.upsert_workspace_index_meta(&meta)?;
+        Ok(self.info_from_meta(meta))
+    }
+
+    fn info_from_meta(&self, meta: DbWorkspaceIndexMeta) -> WorkspaceIndexInfo {
+        let phase = WorkspaceIndexPhase::parse(&meta.phase).unwrap_or(WorkspaceIndexPhase::Failed);
+        let storage_path = meta
+            .storage_relpath
+            .as_ref()
+            .map(|rel| self.paths.data_dir.join(rel));
+        WorkspaceIndexInfo {
+            phase,
+            workspace_root: meta.workspace_root.map(PathBuf::from),
+            entry_count: meta.entry_count as u64,
+            byte_count: meta.byte_count as u64,
+            truncated: meta.truncated,
+            error_message: meta.error_message,
+            storage_path,
+            built_at_ms: meta.built_at,
+        }
+    }
+
+    /// Builds the folder-list policy from persisted local-knowledge preferences.
+    pub fn folder_list_policy(&self) -> Result<crate::FolderListPolicy> {
+        let lk = self.load_config()?.local_knowledge;
+        Ok(crate::FolderListPolicy {
+            honor_gitignore: true,
+            apply_built_in_deny: true,
+            never_list: lk.never_list.iter().map(PathBuf::from).collect(),
+            allowlist_enabled: lk.allowlist_enabled,
+            allowlist: lk.allowlist.iter().map(PathBuf::from).collect(),
+        })
+    }
+
+    /// Returns persisted never-list paths (never-list / never-index).
+    pub fn list_never_list_paths(&self) -> Result<Vec<PathBuf>> {
+        Ok(self
+            .load_config()?
+            .local_knowledge
+            .never_list
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
+    }
+
+    /// Marks a directory as never-list / never-index.
+    pub fn add_never_list_path(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.mutate_path_list(true, path, true)
+    }
+
+    /// Removes a path from the never-list registry.
+    pub fn remove_never_list_path(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.mutate_path_list(true, path, false)
+    }
+
+    /// Whether folder allowlist mode is enabled.
+    pub fn folder_allowlist_enabled(&self) -> Result<bool> {
+        Ok(self.load_config()?.local_knowledge.allowlist_enabled)
+    }
+
+    /// Enables or disables folder allowlist mode.
+    pub fn set_folder_allowlist_enabled(&self, enabled: bool) -> Result<()> {
+        let mut config = self.load_config()?;
+        if config.local_knowledge.allowlist_enabled != enabled {
+            config.local_knowledge.allowlist_enabled = enabled;
+            self.save_config(&config)?;
+        }
+        Ok(())
+    }
+
+    /// Returns approved allowlist roots.
+    pub fn list_folder_allowlist_roots(&self) -> Result<Vec<PathBuf>> {
+        Ok(self
+            .load_config()?
+            .local_knowledge
+            .allowlist
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
+    }
+
+    /// Adds an approved root for allowlist mode.
+    pub fn add_folder_allowlist_root(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.mutate_path_list(false, path, true)
+    }
+
+    /// Removes a root from the folder allowlist.
+    pub fn remove_folder_allowlist_root(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.mutate_path_list(false, path, false)
+    }
+
+    fn mutate_path_list(&self, never_list: bool, path: impl AsRef<Path>, add: bool) -> Result<()> {
+        let absolute = if add {
+            require_existing_dir(path.as_ref())?
+        } else {
+            crate::absolutize_path(path.as_ref())
+        };
+        let key = absolute.to_string_lossy().into_owned();
+        let mut config = self.load_config()?;
+        let list = if never_list {
+            &mut config.local_knowledge.never_list
+        } else {
+            &mut config.local_knowledge.allowlist
+        };
+        let before = list.len();
+        if add {
+            if !list.iter().any(|p| p == &key) {
+                list.push(key);
+            }
+        } else {
+            list.retain(|p| p != &key);
+        }
+        if list.len() != before {
+            self.save_config(&config)?;
+        }
+        Ok(())
     }
 
     /// Creates and persists a new message in the given thread.
@@ -521,4 +961,24 @@ fn peek_logging_config(config_dir: &std::path::Path) -> LoggingConfig {
     toml::from_str::<RoninConfig>(&data)
         .map(|c| c.logging)
         .unwrap_or_default()
+}
+
+fn require_existing_dir(path: &Path) -> Result<PathBuf> {
+    let meta = std::fs::metadata(path).map_err(|_| RoninError::InvalidPrivacyPath {
+        path: path.to_path_buf(),
+    })?;
+    if !meta.is_dir() {
+        return Err(RoninError::InvalidPrivacyPath {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(crate::absolutize_path(path))
+}
+
+fn unix_now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }

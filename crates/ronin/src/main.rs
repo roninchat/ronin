@@ -28,7 +28,11 @@ use ronin::{
     context_indicator::{
         fill_level_color, project_context_indicator, ContextEstimateInput, ContextIndicator,
     },
-    folder_attach::FolderAttachState,
+    desktop_notifications::PortalDesktopNotifier,
+    folder_attach::{
+        folder_browse_filter_placeholder, folder_reveal_more_label, FolderAttachState,
+        FOLDER_ATTACH_UI_VISIBLE_CAP,
+    },
     global_search::{
         artifact_document, group_hits_by_kind, memory_document, search, thread_message_document,
         thread_title_document, SearchContentKind, SearchDatePreset, SearchDocument, SearchHit,
@@ -70,9 +74,10 @@ use ronin_app::{
     MAX_MESSAGES,
 };
 use ronin_core::{
-    clamp_sidebar_width, clipboard_attachment, list_folder_entries, parse_context_tools,
-    read_file_attachment, screenshot_attachment, ChatProvider, ContextAttachmentDraft,
-    ContextToolRef, HttpOllamaProvider, MessageRole, MessageStatus, ScreenshotCapturer,
+    clamp_sidebar_width, clipboard_attachment, list_folder_entries_with_options,
+    list_folder_entries_with_policy, parse_context_tools, read_file_attachment,
+    screenshot_attachment, ChatProvider, ContextAttachmentDraft, ContextToolRef,
+    DesktopNotifier, HttpOllamaProvider, MessageRole, MessageStatus, ScreenshotCapturer,
     ThemePreference,
 };
 
@@ -218,8 +223,11 @@ pub(crate) fn open_main_window(
                     artifact_content_focus: cx.focus_handle(),
                     pending_attachments: Vec::new(),
                     pending_folder_attaches: Vec::new(),
+                    folder_browse_editors: Vec::new(),
+                    folder_filter_focus: None,
                     attachment_size_warn: AttachmentSizeWarnState::default(),
                     screenshot_capturer: Box::new(PortalOrFallbackScreenshotCapturer),
+                    desktop_notifier: Box::new(PortalDesktopNotifier::new()),
                     parsed_messages: std::collections::HashMap::new(),
                     completion_index: 0,
                     picker_suppressed: None,
@@ -287,8 +295,13 @@ struct RoninWindow {
     artifact_content_focus: FocusHandle,
     pending_attachments: Vec<ContextAttachmentDraft>,
     pending_folder_attaches: Vec<FolderAttachState>,
+    /// Browse-filter editors paired 1:1 with `pending_folder_attaches`.
+    folder_browse_editors: Vec<ComposerEditor>,
+    /// Which folder browse-filter editor is focused, if any.
+    folder_filter_focus: Option<usize>,
     attachment_size_warn: AttachmentSizeWarnState,
     screenshot_capturer: Box<dyn ScreenshotCapturer + Send>,
+    desktop_notifier: Box<dyn DesktopNotifier + Send>,
     parsed_messages:
         std::collections::HashMap<String, (usize, Vec<ronin::markdown::MarkdownBlock>)>,
     completion_index: usize,
@@ -331,6 +344,11 @@ struct SidebarDrag {
 const SIDEBAR_COLLAPSED_RAIL: f32 = 40.0;
 
 impl RoninWindow {
+    fn selected_thread_workspace_root(&self) -> Option<std::path::PathBuf> {
+        let selected = self.shell.state().selected_thread_id.clone()?;
+        self.shell.thread_workspace_root(&selected)
+    }
+
     fn resolve_active_chat_provider(&self) -> Option<Box<dyn ChatProvider + Send>> {
         let thread_id = self.shell.state().selected_thread_id.as_deref()?;
         let (provider_name, _) = self
@@ -360,10 +378,29 @@ impl RoninWindow {
     fn apply_dropped_paths(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
         self.file_drop_active = false;
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let result = ingest_dropped_paths(paths, &cwd);
+        let workspace = self.selected_thread_workspace_root();
+        let policy = match self.shell.folder_list_policy() {
+            Ok(policy) => policy,
+            Err(err) => {
+                self.attachment_errors.clear();
+                self.attachment_errors
+                    .push(format!("folder privacy policy unavailable: {err}"));
+                self.attachment_size_warn.clear();
+                cx.notify();
+                return;
+            }
+        };
+        let result = ingest_dropped_paths(paths, workspace.as_deref(), &cwd, &policy);
         self.attachment_errors.clear();
         self.pending_attachments.extend(result.drafts);
+        let added = result.folders.len();
         self.pending_folder_attaches.extend(result.folders);
+        for _ in 0..added {
+            self.folder_browse_editors.push(ComposerEditor::new());
+        }
+        if added > 0 && self.folder_filter_focus.is_none() {
+            self.folder_filter_focus = Some(self.pending_folder_attaches.len() - added);
+        }
         self.attachment_errors.extend(result.errors);
         self.attachment_size_warn.clear();
         cx.notify();
@@ -501,9 +538,17 @@ impl RoninWindow {
         chars
     }
 
+    fn clear_pending_folder_attaches(&mut self) {
+        self.pending_folder_attaches.clear();
+        self.folder_browse_editors.clear();
+        self.folder_filter_focus = None;
+    }
+
     fn materialize_folder_attachments(&mut self) -> Vec<ContextAttachmentDraft> {
         let mut out = Vec::new();
         let folders = std::mem::take(&mut self.pending_folder_attaches);
+        self.folder_browse_editors.clear();
+        self.folder_filter_focus = None;
         for folder in folders {
             match folder.to_context_draft() {
                 Ok(draft) => out.push(draft),
@@ -511,6 +556,48 @@ impl RoninWindow {
             }
         }
         out
+    }
+
+    fn sync_folder_browse_filters_from_editors(&mut self) {
+        while self.folder_browse_editors.len() < self.pending_folder_attaches.len() {
+            self.folder_browse_editors.push(ComposerEditor::new());
+        }
+        self.folder_browse_editors
+            .truncate(self.pending_folder_attaches.len());
+        for (i, folder) in self.pending_folder_attaches.iter_mut().enumerate() {
+            if let Some(ed) = self.folder_browse_editors.get(i) {
+                folder.set_browse_filter(ed.text().to_string());
+            }
+        }
+    }
+
+    /// Progressive deepen of a pending folder listing under documented caps.
+    fn reveal_more_folder_listing(&mut self, folder_idx: usize) {
+        let Some(folder) = self.pending_folder_attaches.get(folder_idx) else {
+            return;
+        };
+        if !folder.can_reveal_more() {
+            return;
+        }
+        let root = folder.listing().root.clone();
+        let options = folder.deepen_options();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let policy = match self.shell.folder_list_policy() {
+            Ok(policy) => policy,
+            Err(err) => {
+                self.attachment_errors
+                    .push(format!("folder privacy policy unavailable: {err}"));
+                return;
+            }
+        };
+        match list_folder_entries_with_options(&root, None, &cwd, &policy, &options) {
+            Ok(listing) => {
+                if let Some(folder) = self.pending_folder_attaches.get_mut(folder_idx) {
+                    folder.replace_listing(listing);
+                }
+            }
+            Err(err) => self.attachment_errors.push(err.to_string()),
+        }
     }
 
     fn attachment_warn_threshold(&self) -> usize {
@@ -633,11 +720,21 @@ impl RoninWindow {
         self.attachment_errors.clear();
         let parsed = parse_context_tools(text);
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let workspace = self.selected_thread_workspace_root();
+        let policy = match self.shell.folder_list_policy() {
+            Ok(policy) => policy,
+            Err(err) => {
+                self.attachment_errors
+                    .push(format!("folder privacy policy unavailable: {err}"));
+                return (parsed.visible_message, Vec::new());
+            }
+        };
         let mut attachments = self.pending_attachments.clone();
         attachments.extend(self.materialize_folder_attachments());
 
+        // Launch `--attach` stays CWD/absolute — never rebased onto workspace root.
         for path in &self.preattached_files {
-            match read_file_attachment(path, &cwd) {
+            match read_file_attachment(path, None, &cwd) {
                 Ok(a) => attachments.push(a),
                 Err(e) => self.attachment_errors.push(e.to_string()),
             }
@@ -645,20 +742,29 @@ impl RoninWindow {
 
         for r in parsed.refs {
             match r {
-                ContextToolRef::File(path) => match read_file_attachment(&path, &cwd) {
-                    Ok(a) => attachments.push(a),
-                    Err(e) => self.attachment_errors.push(e.to_string()),
-                },
-                ContextToolRef::Folder(path) => match list_folder_entries(&path, &cwd) {
-                    Ok(listing) => {
-                        let state = FolderAttachState::from_listing(listing);
-                        match state.to_context_draft() {
-                            Ok(a) => attachments.push(a),
-                            Err(e) => self.attachment_errors.push(e.to_string()),
-                        }
+                ContextToolRef::File(path) => {
+                    match read_file_attachment(&path, workspace.as_deref(), &cwd) {
+                        Ok(a) => attachments.push(a),
+                        Err(e) => self.attachment_errors.push(e.to_string()),
                     }
-                    Err(e) => self.attachment_errors.push(e.to_string()),
-                },
+                }
+                ContextToolRef::Folder(path) => {
+                    match list_folder_entries_with_policy(
+                        &path,
+                        workspace.as_deref(),
+                        &cwd,
+                        &policy,
+                    ) {
+                        Ok(listing) => {
+                            let state = FolderAttachState::from_listing(listing);
+                            match state.to_context_draft() {
+                                Ok(a) => attachments.push(a),
+                                Err(e) => self.attachment_errors.push(e.to_string()),
+                            }
+                        }
+                        Err(e) => self.attachment_errors.push(e.to_string()),
+                    }
+                }
                 ContextToolRef::Clipboard => {
                     match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                         Ok(t) => attachments.push(clipboard_attachment(&t)),
@@ -709,16 +815,43 @@ impl RoninWindow {
     }
 
     fn capture_screenshot_attachment(&self) -> Result<ContextAttachmentDraft, String> {
+        self.capture_screenshot_attachment_with_preference(
+            ronin_core::ScreenshotTargetPreference::Interactive,
+        )
+    }
+
+    fn capture_screenshot_attachment_with_preference(
+        &self,
+        preference: ronin_core::ScreenshotTargetPreference,
+    ) -> Result<ContextAttachmentDraft, String> {
         let dest_dir = self.shell.session().paths().data_dir.join("screenshots");
         let path = self
             .screenshot_capturer
-            .capture(&dest_dir)
+            .capture_with_preference(&dest_dir, preference)
             .map_err(|e| e.to_string())?;
         screenshot_attachment(&path).map_err(|e| e.to_string())
     }
 
     fn take_screenshot_action(&mut self, cx: &mut Context<Self>) {
-        match self.capture_screenshot_attachment() {
+        self.take_screenshot_action_with_preference(
+            ronin_core::ScreenshotTargetPreference::Interactive,
+            cx,
+        );
+    }
+
+    fn take_window_screenshot_action(&mut self, cx: &mut Context<Self>) {
+        self.take_screenshot_action_with_preference(
+            ronin_core::ScreenshotTargetPreference::Window,
+            cx,
+        );
+    }
+
+    fn take_screenshot_action_with_preference(
+        &mut self,
+        preference: ronin_core::ScreenshotTargetPreference,
+        cx: &mut Context<Self>,
+    ) {
+        match self.capture_screenshot_attachment_with_preference(preference) {
             Ok(draft) => {
                 self.pending_attachments.push(draft);
                 cx.notify();
@@ -732,9 +865,12 @@ impl RoninWindow {
 
     fn composer_attachment_previews(&self) -> Vec<AttachmentPreview> {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let workspace = self.selected_thread_workspace_root();
         let mut drafts = self.pending_attachments.clone();
+        let policy = self.shell.folder_list_policy().ok();
+        // Launch `--attach` previews resolve against process CWD only.
         for path in &self.preattached_files {
-            if let Ok(draft) = read_file_attachment(path, &cwd) {
+            if let Ok(draft) = read_file_attachment(path, None, &cwd) {
                 drafts.push(draft);
             }
         }
@@ -742,12 +878,17 @@ impl RoninWindow {
         for tool_ref in parsed.refs {
             match tool_ref {
                 ContextToolRef::File(path) => {
-                    if let Ok(draft) = read_file_attachment(&path, &cwd) {
+                    if let Ok(draft) = read_file_attachment(&path, workspace.as_deref(), &cwd) {
                         drafts.push(draft);
                     }
                 }
                 ContextToolRef::Folder(path) => {
-                    if let Ok(listing) = list_folder_entries(&path, &cwd) {
+                    let Some(policy) = policy.as_ref() else {
+                        continue;
+                    };
+                    if let Ok(listing) =
+                        list_folder_entries_with_policy(&path, workspace.as_deref(), &cwd, policy)
+                    {
                         let state = FolderAttachState::from_listing(listing);
                         if let Ok(draft) = state.to_context_draft() {
                             drafts.push(draft);
@@ -957,7 +1098,7 @@ impl RoninWindow {
                 } else {
                     self.preattached_files.clear();
                     self.pending_attachments.clear();
-                    self.pending_folder_attaches.clear();
+                    self.clear_pending_folder_attaches();
                 }
                 cx.notify();
                 return;
@@ -981,7 +1122,7 @@ impl RoninWindow {
                     Ok(()) => {
                         self.preattached_files.clear();
                         self.pending_attachments.clear();
-                        self.pending_folder_attaches.clear();
+                        self.clear_pending_folder_attaches();
                         cx.notify();
                     }
                     Err(err) => {
@@ -1001,7 +1142,7 @@ impl RoninWindow {
                 } else {
                     self.preattached_files.clear();
                     self.pending_attachments.clear();
-                    self.pending_folder_attaches.clear();
+                    self.clear_pending_folder_attaches();
                 }
                 cx.notify();
             }
@@ -1186,12 +1327,17 @@ impl RoninWindow {
             PickerKind::AtAttachment => {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
                 match item.at_kind() {
-                    Some(AtAttachmentKind::Screenshot) => {
+                    Some(AtAttachmentKind::Screenshot | AtAttachmentKind::ScreenshotWindow) => {
+                        let preference = match item.at_kind() {
+                            Some(AtAttachmentKind::ScreenshotWindow) => {
+                                ronin_core::ScreenshotTargetPreference::Window
+                            }
+                            _ => ronin_core::ScreenshotTargetPreference::Interactive,
+                        };
                         self.composer.replace_range(picker.token_start, cursor, "");
                         self.completion_index = 0;
                         self.picker_suppressed = None;
-                        // Capture immediately (same as Screenshot button).
-                        match self.capture_screenshot_attachment() {
+                        match self.capture_screenshot_attachment_with_preference(preference) {
                             Ok(draft) => self.pending_attachments.push(draft),
                             Err(e) => self.attachment_errors.push(e),
                         }
@@ -1302,6 +1448,23 @@ impl RoninWindow {
 
         if alt_or_plat {
             return;
+        }
+
+        // Folder browse-filter field steals typing while focused.
+        if let Some(idx) = self.folder_filter_focus {
+            if let Some(ed) = self.folder_browse_editors.get_mut(idx) {
+                if ed.on_key_down(event) {
+                    self.blink_start = std::time::Instant::now();
+                    self.sync_folder_browse_filters_from_editors();
+                    cx.notify();
+                    return;
+                }
+                if ks.key.eq_ignore_ascii_case("escape") {
+                    self.folder_filter_focus = None;
+                    cx.notify();
+                    return;
+                }
+            }
         }
 
         // Reset blink timer on any user input so cursor is visible during typing
@@ -1522,6 +1685,7 @@ impl RoninWindow {
         let was_generating = self.shell.is_generation_active();
         let active = self.shell.poll_streaming();
         let title_active = self.shell.poll_title_generation();
+        self.flush_desktop_notifications();
         if !active && self.chat_provider.is_none() {
             self.chat_provider = self.resolve_active_chat_provider();
         }
@@ -1529,6 +1693,25 @@ impl RoninWindow {
             self.try_auto_title_after_exchange();
         }
         active || title_active
+    }
+
+    fn flush_desktop_notifications(&mut self) {
+        for request in self.shell.drain_pending_desktop_notifications() {
+            if let Err(e) = self.desktop_notifier.notify(&request) {
+                tracing::warn!(%e, notification_id = %request.id, "desktop notification failed");
+            }
+        }
+    }
+
+    fn pump_notification_focus_actions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        while let Some(thread_id) = self.desktop_notifier.poll_focus_thread() {
+            if let Err(e) = self.shell.select_thread(&thread_id) {
+                tracing::warn!(%e, %thread_id, "notification focus: failed to select thread");
+            }
+            window.activate_window();
+            cx.activate(true);
+            cx.notify();
+        }
     }
 
     /// Polls single-instance IPC and applies routed CLI intents.
@@ -3628,7 +3811,7 @@ impl RoninWindow {
             .can_drop(|value, _, _| value.is::<ExternalPaths>())
             .on_drop(cx.listener(Self::on_external_paths_drop));
 
-        // Screenshot action
+        // Screenshot actions (interactive + window-targeted when portal supports it)
         composer = composer.child(
             div()
                 .flex()
@@ -3654,6 +3837,24 @@ impl RoninWindow {
                 )
                 .child(
                     div()
+                        .rounded_lg()
+                        .px_3()
+                        .py_1()
+                        .bg(theme.surface_muted)
+                        .text_xs()
+                        .text_color(theme.text_primary)
+                        .cursor_pointer()
+                        .child("Window")
+                        .hover(|style| style.bg(theme.surface_hover))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.take_window_screenshot_action(cx);
+                            }),
+                        ),
+                )
+                .child(
+                    div()
                         .text_xs()
                         .text_color(theme.text_muted)
                         .child("or type @screenshot"),
@@ -3663,6 +3864,32 @@ impl RoninWindow {
         // Folder attach file selection
         if !self.pending_folder_attaches.is_empty() {
             for (folder_idx, folder) in self.pending_folder_attaches.iter().enumerate() {
+                let filter_focused = self.folder_filter_focus == Some(folder_idx);
+                let filter_text = self
+                    .folder_browse_editors
+                    .get(folder_idx)
+                    .map(|e| e.text().to_string())
+                    .unwrap_or_else(|| folder.browse_filter().to_string());
+                let filter_opt = {
+                    let t = filter_text.trim();
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t.to_string())
+                    }
+                };
+                let visible: Vec<_> = folder
+                    .listing()
+                    .entries
+                    .iter()
+                    .filter(|e| {
+                        ronin_core::folder_entry_matches_browse_filter(
+                            &e.relative_path,
+                            filter_opt.as_deref(),
+                        )
+                    })
+                    .take(FOLDER_ATTACH_UI_VISIBLE_CAP)
+                    .collect();
                 let mut panel = div()
                     .rounded_lg()
                     .border_1()
@@ -3682,6 +3909,43 @@ impl RoninWindow {
                                 folder.name(),
                                 folder.selected_count()
                             )),
+                    )
+                    .child(
+                        div()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if filter_focused {
+                                theme.accent
+                            } else {
+                                theme.border_subtle
+                            })
+                            .px_2()
+                            .py_1()
+                            .cursor_pointer()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if filter_text.trim().is_empty() {
+                                        theme.text_muted
+                                    } else {
+                                        theme.text_primary
+                                    })
+                                    .child(if filter_text.trim().is_empty() {
+                                        folder_browse_filter_placeholder().to_string()
+                                    } else {
+                                        filter_text.clone()
+                                    }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    while this.folder_browse_editors.len() <= folder_idx {
+                                        this.folder_browse_editors.push(ComposerEditor::new());
+                                    }
+                                    this.folder_filter_focus = Some(folder_idx);
+                                    cx.notify();
+                                }),
+                            ),
                     );
                 if folder.listing().truncated {
                     panel = panel.child(
@@ -3691,7 +3955,24 @@ impl RoninWindow {
                             .child(ronin::folder_attach::folder_truncated_hint()),
                     );
                 }
-                for entry in folder.listing().entries.iter().take(40) {
+                if folder.can_reveal_more() {
+                    panel = panel.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.accent)
+                            .cursor_pointer()
+                            .child(folder_reveal_more_label())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.sync_folder_browse_filters_from_editors();
+                                    this.reveal_more_folder_listing(folder_idx);
+                                    cx.notify();
+                                }),
+                            ),
+                    );
+                }
+                for entry in visible {
                     let rel = entry.relative_path.clone();
                     let selected = folder.is_selected(&rel);
                     panel = panel.child(
@@ -5486,6 +5767,7 @@ impl Render for RoninWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let streaming_active = self.pump_streaming();
         let _ = self.pump_instance_ipc(window, cx);
+        self.pump_notification_focus_actions(window, cx);
         if self.needs_initial_focus {
             self.needs_initial_focus = false;
             window.focus(&self.composer_focus);

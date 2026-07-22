@@ -15,6 +15,7 @@ fn at_catalog_should_list_required_attachment_sources() {
     assert!(kinds.contains(&AtAttachmentKind::Folder));
     assert!(kinds.contains(&AtAttachmentKind::Clipboard));
     assert!(kinds.contains(&AtAttachmentKind::Screenshot));
+    assert!(kinds.contains(&AtAttachmentKind::ScreenshotWindow));
     assert!(kinds.contains(&AtAttachmentKind::Artifact));
     assert!(kinds.contains(&AtAttachmentKind::Memory));
 }

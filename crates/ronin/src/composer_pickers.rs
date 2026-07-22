@@ -22,8 +22,10 @@ pub enum AtAttachmentKind {
     Folder,
     /// `@clipboard` paste attachment.
     Clipboard,
-    /// `@screenshot` capture attachment.
+    /// `@screenshot` capture attachment (interactive / default).
     Screenshot,
+    /// Window-targeted screenshot capture (falls back when unsupported).
+    ScreenshotWindow,
     /// `@artifact:` saved artifact ref.
     Artifact,
     /// `@memory:` saved memory ref.
@@ -116,6 +118,11 @@ pub fn at_attachment_catalog() -> &'static [PickerItem] {
             insert: "@screenshot",
             label: "Capture screenshot",
             kind: PickerItemKind::At(AtAttachmentKind::Screenshot),
+        },
+        PickerItem {
+            insert: "@screenshot:window",
+            label: "Capture window",
+            kind: PickerItemKind::At(AtAttachmentKind::ScreenshotWindow),
         },
         PickerItem {
             insert: "@artifact:",

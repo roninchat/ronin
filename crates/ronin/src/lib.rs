@@ -32,8 +32,16 @@ pub mod artifacts_panel;
 /// Attachment preview models for composer and sent messages.
 pub mod attachment_preview;
 
-/// Wayland portal screenshot capture with CLI fallbacks.
+/// Wayland portal screenshot capture with CLI fallbacks (window target + fallback).
 pub mod screenshot_capture;
+
+pub use screenshot_capture::{
+    host_would_attempt_window_target, resolve_host_screenshot_plan,
+    PortalOrFallbackScreenshotCapturer,
+};
+
+/// XDG Desktop Portal notifications for generation done/fail.
+pub mod desktop_notifications;
 
 /// Opt-in clipboard watch host reader (arboard) for confirm-to-attach proposals.
 pub mod clipboard_watch;
