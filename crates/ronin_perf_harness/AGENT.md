@@ -42,9 +42,11 @@ cargo run -p ronin_perf_harness --release -- propose-baseline plain_short
 cargo run -p ronin_perf_harness --release -- accept-baseline plain_short
 ```
 
-Helper wrapper (same repo):
+Helper wrappers (same repo):
 
 ```bash
+./scripts/perf-harness-agent.sh plain_short
+# or
 ./crates/ronin_perf_harness/agent-run.sh plain_short
 ```
 

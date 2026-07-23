@@ -17,8 +17,9 @@ Paint Timing export from real `markdown_view` / list render, focus+key/click Dri
 
 ## Agent / loop usage
 
-See **[AGENT.md](./AGENT.md)** for the machine-readable Improvement Signal contract and
-`./agent-run.sh <scenario>` wrapper. Humans can use the same commands below.
+See **[AGENT.md](./AGENT.md)** for the machine-readable Improvement Signal contract.
+Wrappers: `./agent-run.sh <scenario>` or repo-root `./scripts/perf-harness-agent.sh <scenario>`.
+Humans can use the same `cargo` commands below.
 
 ```bash
 # Exploratory (debug); official judgments need --release
