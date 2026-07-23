@@ -40,9 +40,9 @@ pub use config::{
     clamp_sidebar_width, effective_sidebar_width, export_provider_config_toml,
     import_provider_config_toml, resolve_color_scheme, validate_provider_config_export,
     ClipboardWatchConfig, ColorScheme, GeneralConfig, LocalKnowledgeConfig, LoggingConfig,
-    NotificationsConfig, OllamaConfig, OpenAiConfig,
-    PersonaConfig, PersonaMode, ProviderConfigExport, RoninConfig, ThemePreference, UiConfig,
-    SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
+    NotificationsConfig, OllamaConfig, OpenAiConfig, PersonaConfig, PersonaMode,
+    ProviderConfigExport, RoninConfig, ThemePreference, UiConfig, SIDEBAR_WIDTH_DEFAULT,
+    SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
 };
 pub use context::{
     artifact_attachment, attachment_content_chars, clipboard_attachment, context_path_base,

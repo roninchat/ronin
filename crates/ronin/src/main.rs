@@ -76,9 +76,8 @@ use ronin_app::{
 use ronin_core::{
     clamp_sidebar_width, clipboard_attachment, list_folder_entries_with_options,
     list_folder_entries_with_policy, parse_context_tools, read_file_attachment,
-    screenshot_attachment, ChatProvider, ContextAttachmentDraft, ContextToolRef,
-    DesktopNotifier, HttpOllamaProvider, MessageRole, MessageStatus, ScreenshotCapturer,
-    ThemePreference,
+    screenshot_attachment, ChatProvider, ContextAttachmentDraft, ContextToolRef, DesktopNotifier,
+    HttpOllamaProvider, MessageRole, MessageStatus, ScreenshotCapturer, ThemePreference,
 };
 
 mod quick_overlay;

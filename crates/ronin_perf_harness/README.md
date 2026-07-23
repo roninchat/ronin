@@ -15,7 +15,10 @@ propose/accept baseline, `harness` feature-gated control-plane command parser, D
 Paint Timing export from real `markdown_view` / list render, focus+key/click Drive Smoke,
 `loop/` consumer of the Improvement Signal.
 
-## Run
+## Agent / loop usage
+
+See **[AGENT.md](./AGENT.md)** for the machine-readable Improvement Signal contract and
+`./agent-run.sh <scenario>` wrapper. Humans can use the same commands below.
 
 ```bash
 # Exploratory (debug); official judgments need --release

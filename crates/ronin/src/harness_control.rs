@@ -63,4 +63,30 @@ mod tests {
         );
         assert_eq!(parse_harness_command("nope"), None);
     }
+
+    #[test]
+    fn parse_command_matrix_dense() {
+        for id in 0..80 {
+            let line = format!("open thread_{id}");
+            let cmd = parse_harness_command(&line).expect("open");
+            match cmd {
+                HarnessControlCommand::OpenThread { thread_id } => {
+                    assert_eq!(thread_id, format!("thread_{id}"));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        for delta in -40..40 {
+            let line = format!("scroll {delta}");
+            assert_eq!(
+                parse_harness_command(&line),
+                Some(HarnessControlCommand::ScrollMessages { delta })
+            );
+        }
+        for junk in [
+            "", " ", "open", "open ", "scroll", "scroll x", "pong", "OPEN x",
+        ] {
+            assert_eq!(parse_harness_command(junk), None, "{junk:?}");
+        }
+    }
 }

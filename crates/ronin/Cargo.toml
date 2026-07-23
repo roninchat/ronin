@@ -29,3 +29,8 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[test]]
+name = "harness_control_corpus"
+path = "tests/harness_control_corpus.rs"
+required-features = ["harness"]
