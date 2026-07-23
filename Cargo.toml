@@ -4,6 +4,7 @@ members = [
     "crates/ronin_app",
     "crates/ronin_core",
     "crates/ronin_db",
+    "crates/ronin_perf_harness",
 ]
 resolver = "2"
 

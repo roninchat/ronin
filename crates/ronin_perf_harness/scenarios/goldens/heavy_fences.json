@@ -1,0 +1,4 @@
+[
+  "Please show a Rust and a TypeScript example.",
+  "```rust\nuse std::collections::HashMap;\n\npub fn index(words: &[&str]) -> HashMap<String, usize> {\n    let mut map = HashMap::new();\n    for (i, w) in words.iter().enumerate() {\n        map.insert((*w).to_string(), i);\n    }\n    map\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn indexes() {\n        let m = index(&[\"a\", \"b\"]);\n        assert_eq!(m.get(\"a\"), Some(&0));\n    }\n}\n```\n\n```typescript\nexport function fold<T>(xs: T[], f: (a: T, b: T) => T, init: T): T {\n  return xs.reduce(f, init);\n}\n\nconst sum = fold([1, 2, 3], (a, b) => a + b, 0);\nconsole.log(sum);\n```\n\nMore fences:\n\n```python\ndef fib(n: int) -> int:\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n```"
+]

@@ -4581,6 +4581,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ronin_perf_harness"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+ "ronin_core",
+ "serde",
+ "serde_json",
+ "syntect",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+]
+
+[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
