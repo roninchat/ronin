@@ -45,6 +45,18 @@ pub enum NavAction {
     ToggleHelp,
     /// Global search overlay visibility flipped.
     ToggleSearch,
+    /// Quick palette (threads + actions). Ctrl+P.
+    TogglePalette,
+    /// Command palette (commands). Ctrl+Shift+P.
+    ToggleCommandPalette,
+    /// Increase UI zoom. Ctrl+= / Ctrl++.
+    ZoomIn,
+    /// Decrease UI zoom. Ctrl+-.
+    ZoomOut,
+    /// Restore default UI zoom. Ctrl+0.
+    ZoomReset,
+    /// Toggle the window menu.
+    ToggleWindowMenu,
 }
 
 /// Normalized key event for the navigation state machine.
@@ -166,6 +178,21 @@ impl KeyboardNavState {
                 }
                 "f" => {
                     return (true, NavAction::ToggleSearch);
+                }
+                "p" if key.shift => {
+                    return (true, NavAction::ToggleCommandPalette);
+                }
+                "p" => {
+                    return (true, NavAction::TogglePalette);
+                }
+                "=" | "+" => {
+                    return (true, NavAction::ZoomIn);
+                }
+                "-" => {
+                    return (true, NavAction::ZoomOut);
+                }
+                "0" => {
+                    return (true, NavAction::ZoomReset);
                 }
                 "1" => {
                     self.set_focus(FocusRegion::Sidebar, thread_count);
@@ -328,6 +355,22 @@ pub fn shortcut_catalog() -> &'static [ShortcutHint] {
         ShortcutHint {
             keys: "Ctrl+/",
             action: "Toggle keyboard shortcut help",
+        },
+        ShortcutHint {
+            keys: "Ctrl+P",
+            action: "Command palette",
+        },
+        ShortcutHint {
+            keys: "Ctrl+Shift+P",
+            action: "Command palette (commands)",
+        },
+        ShortcutHint {
+            keys: "Ctrl+= / Ctrl+-",
+            action: "Zoom",
+        },
+        ShortcutHint {
+            keys: "Ctrl+0",
+            action: "Reset zoom",
         },
     ]
 }

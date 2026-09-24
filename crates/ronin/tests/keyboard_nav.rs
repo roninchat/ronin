@@ -22,6 +22,15 @@ fn ctrl(key: &str) -> KeyInput<'_> {
     }
 }
 
+fn ctrl_shift(key: &str) -> KeyInput<'_> {
+    KeyInput {
+        key,
+        control: true,
+        shift: true,
+        alt: false,
+    }
+}
+
 fn shift_tab() -> KeyInput<'static> {
     KeyInput {
         key: "tab",
@@ -177,6 +186,10 @@ fn shortcut_catalog_should_include_m0_and_navigation_shortcuts() {
         "Page",
         "Ctrl+/",
         "Ctrl+F",
+        "Ctrl+P",
+        "Ctrl+Shift+P",
+        "Ctrl+=",
+        "Ctrl+0",
     ] {
         assert!(
             blob.contains(needle),
@@ -211,4 +224,52 @@ fn ctrl_f_should_toggle_search() {
     );
     assert!(consumed);
     assert_eq!(action, NavAction::ToggleSearch);
+}
+
+#[test]
+fn ctrl_p_should_toggle_palette_when_control() {
+    let mut nav = KeyboardNavState::new();
+    let (consumed, action) = nav.handle_key(ctrl("p"), 0);
+    assert!(consumed);
+    assert_eq!(action, NavAction::TogglePalette);
+}
+
+#[test]
+fn ctrl_shift_p_should_toggle_command_palette_when_control() {
+    let mut nav = KeyboardNavState::new();
+    let (consumed, action) = nav.handle_key(ctrl_shift("p"), 0);
+    assert!(consumed);
+    assert_eq!(action, NavAction::ToggleCommandPalette);
+}
+
+#[test]
+fn ctrl_equals_should_zoom_in_when_control() {
+    let mut nav = KeyboardNavState::new();
+    let (consumed, action) = nav.handle_key(ctrl("="), 0);
+    assert!(consumed);
+    assert_eq!(action, NavAction::ZoomIn);
+}
+
+#[test]
+fn ctrl_plus_should_zoom_in_when_control() {
+    let mut nav = KeyboardNavState::new();
+    let (consumed, action) = nav.handle_key(ctrl("+"), 0);
+    assert!(consumed);
+    assert_eq!(action, NavAction::ZoomIn);
+}
+
+#[test]
+fn ctrl_minus_should_zoom_out_when_control() {
+    let mut nav = KeyboardNavState::new();
+    let (consumed, action) = nav.handle_key(ctrl("-"), 0);
+    assert!(consumed);
+    assert_eq!(action, NavAction::ZoomOut);
+}
+
+#[test]
+fn ctrl_zero_should_reset_zoom_when_control() {
+    let mut nav = KeyboardNavState::new();
+    let (consumed, action) = nav.handle_key(ctrl("0"), 0);
+    assert!(consumed);
+    assert_eq!(action, NavAction::ZoomReset);
 }

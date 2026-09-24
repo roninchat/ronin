@@ -1,8 +1,9 @@
 //! Provider config import/export (portable TOML, no secrets).
 
 use ronin_core::{
-    export_provider_config_toml, import_provider_config_toml, GeneralConfig, OllamaConfig,
-    OpenAiConfig, RoninConfig, RoninPaths, RoninSession,
+    export_provider_config_toml, import_provider_config_toml, FeaturesConfig, GeneralConfig,
+    OllamaConfig, OpenAiConfig, PersonaConfig, PersonaMode, RoninConfig, RoninPaths, RoninSession,
+    ThemePreference, UiConfig,
 };
 use tempfile::TempDir;
 
@@ -184,4 +185,51 @@ fn session_should_export_and_import_provider_config_files() {
     let loaded = session.load_config().expect("load");
     assert_eq!(loaded.general.default_model.as_deref(), Some("mistral"));
     assert_eq!(loaded.ollama.base_url, "http://export-host:11434");
+}
+
+#[test]
+fn import_provider_config_should_preserve_theme_ui_persona_and_features() {
+    let current = RoninConfig {
+        theme: ThemePreference::Dark,
+        ui: UiConfig {
+            sidebar_width: 360.0,
+            sidebar_collapsed: false,
+            scale: 1.25,
+            show_shortcut_hints: false,
+            shortcut_coach_seen: true,
+        },
+        persona: PersonaConfig {
+            mode: PersonaMode::Replace,
+            text: "keep this persona".into(),
+        },
+        features: FeaturesConfig {
+            memories: true,
+            artifacts: true,
+        },
+        ollama: OllamaConfig {
+            base_url: "http://old:11434".into(),
+        },
+        ..RoninConfig::default()
+    };
+
+    let imported = import_provider_config_toml(
+        &current,
+        r#"
+[general]
+default_provider = "openai"
+default_model = "gpt-4o"
+
+[ollama]
+base_url = "http://imported:11434"
+"#,
+    )
+    .expect("import");
+
+    assert_eq!(imported.theme, ThemePreference::Dark);
+    assert_eq!(imported.ui, current.ui);
+    assert_eq!(imported.persona, current.persona);
+    assert_eq!(imported.features, current.features);
+    assert_eq!(imported.ollama.base_url, "http://imported:11434");
+    assert_eq!(imported.general.default_provider.as_deref(), Some("openai"));
+    assert_eq!(imported.general.default_model.as_deref(), Some("gpt-4o"));
 }

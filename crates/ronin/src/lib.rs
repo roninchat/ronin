@@ -88,6 +88,27 @@ pub mod instance;
 /// Linux packaging: .desktop validation, install path planning, icon inventory.
 pub mod packaging;
 
+/// Bundled Lucide icons and Inter fonts for the GPUI shell.
+pub mod assets;
+
+/// Named Lucide icons and SVG element helpers.
+pub mod icons;
+
+/// Window chrome metrics and overflow menus.
+pub mod chrome;
+
+/// Ctrl+P quick switcher and Ctrl+Shift+P command palette.
+pub mod command_palette;
+
+/// Settings overlay sections and field labels.
+pub mod settings_view;
+
+/// First-run shortcut coach steps.
+pub mod shortcut_coach;
+
+/// Composer + attach menu rows.
+pub mod plus_menu;
+
 pub use instance::{
     acquire_instance, instance_runtime_dir, plan_incoming_launch, AppliedIntent, IncomingLaunch,
     InstanceAcquire, InstanceError, InstancePrimary,

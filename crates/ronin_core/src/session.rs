@@ -836,7 +836,7 @@ impl RoninSession {
             .map_err(Into::into)
     }
 
-    /// Creates a new memory.
+    /// Creates a new memory, disabled until the user opts in.
     pub fn create_memory(&self, title: &str, content: &str) -> Result<Memory> {
         self.db
             .create_memory(title, content)
@@ -844,7 +844,10 @@ impl RoninSession {
             .map_err(Into::into)
     }
 
-    /// Creates a profile-group memory (always-on user context when enabled).
+    /// Creates a profile-group memory.
+    ///
+    /// The memory itself starts enabled. Injection into provider context still
+    /// requires [`crate::config::FeaturesConfig::memories`].
     pub fn create_profile_memory(&self, title: &str, content: &str) -> Result<Memory> {
         self.db
             .create_memory_with_flags(title, content, true, true)

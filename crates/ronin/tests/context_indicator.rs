@@ -1,9 +1,9 @@
 //! Public seams for composer context/token size estimation and indicator presentation.
 
 use ronin::context_indicator::{
-    estimate_tokens_from_chars, fill_level_for_ratio, format_token_count,
-    project_context_indicator, resolve_model_context_window, ContextEstimateInput,
-    ContextFillLevel,
+    context_indicator_visible, estimate_tokens_from_chars, fill_level_for_ratio,
+    format_token_count, project_context_indicator, resolve_model_context_window,
+    ContextEstimateInput, ContextFillLevel, ContextIndicator,
 };
 use ronin_app::{MAX_CHARS, MAX_MESSAGES};
 
@@ -49,6 +49,7 @@ fn project_should_estimate_small_thread_without_omission() {
         indicator.summary_label
     );
     assert!(indicator.omission_label.is_none());
+    assert!(!context_indicator_visible(&indicator));
 }
 
 #[test]
@@ -187,4 +188,40 @@ fn fill_ratio_should_rise_toward_critical_as_context_grows() {
 
     assert!(large.fill_ratio > small.fill_ratio);
     assert_eq!(large.level, ContextFillLevel::Critical);
+}
+
+fn indicator_with(level: ContextFillLevel, messages_omitted: bool) -> ContextIndicator {
+    ContextIndicator {
+        estimated_tokens: 414,
+        used_chars: 1_656,
+        limit_tokens: Some(20_000),
+        limit_chars: 80_000,
+        fill_ratio: match level {
+            ContextFillLevel::Comfortable => 414.0 / 20_000.0,
+            ContextFillLevel::Elevated => 0.65,
+            ContextFillLevel::Critical => 0.90,
+        },
+        level,
+        messages_omitted,
+        summary_label: "~414 / 20k tokens".to_string(),
+        omission_label: None,
+    }
+}
+
+#[test]
+fn context_indicator_should_not_be_visible_when_comfortable_small_thread() {
+    let indicator = indicator_with(ContextFillLevel::Comfortable, false);
+    assert!(!context_indicator_visible(&indicator));
+}
+
+#[test]
+fn context_indicator_should_be_visible_when_messages_omitted() {
+    let indicator = indicator_with(ContextFillLevel::Comfortable, true);
+    assert!(context_indicator_visible(&indicator));
+}
+
+#[test]
+fn context_indicator_should_be_visible_when_elevated_ratio() {
+    let indicator = indicator_with(ContextFillLevel::Elevated, false);
+    assert!(context_indicator_visible(&indicator));
 }

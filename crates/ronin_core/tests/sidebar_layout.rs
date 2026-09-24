@@ -1,8 +1,9 @@
 //! Sidebar width clamping and config persistence.
 
 use ronin_core::{
-    clamp_sidebar_width, effective_sidebar_width, RoninConfig, RoninPaths, RoninSession, UiConfig,
-    SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
+    clamp_sidebar_width, clamp_ui_scale, effective_sidebar_width, RoninConfig, RoninPaths,
+    RoninSession, UiConfig, SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
+    UI_SCALE_DEFAULT, UI_SCALE_MAX, UI_SCALE_MIN,
 };
 use tempfile::TempDir;
 
@@ -49,11 +50,44 @@ fn effective_sidebar_width_should_be_zero_when_collapsed() {
 }
 
 #[test]
+fn clamp_ui_scale_should_enforce_min_and_max() {
+    assert_eq!(clamp_ui_scale(UI_SCALE_MIN - 0.2), UI_SCALE_MIN);
+    assert_eq!(clamp_ui_scale(UI_SCALE_MAX + 0.4), UI_SCALE_MAX);
+    assert_eq!(clamp_ui_scale(1.2), 1.2);
+}
+
+#[test]
+fn clamp_ui_scale_should_fallback_for_non_finite() {
+    assert_eq!(clamp_ui_scale(f32::NAN), UI_SCALE_DEFAULT);
+    assert_eq!(clamp_ui_scale(f32::INFINITY), UI_SCALE_DEFAULT);
+    assert_eq!(clamp_ui_scale(f32::NEG_INFINITY), UI_SCALE_DEFAULT);
+}
+
+#[test]
 fn load_config_should_default_sidebar_layout_when_missing() {
     let (_temp, session) = session_with_toml("");
     let config = session.load_config().expect("load config");
     assert_eq!(config.ui.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
-    assert!(!config.ui.sidebar_collapsed);
+    assert!(config.ui.sidebar_collapsed);
+    assert_eq!(config.ui.scale, UI_SCALE_DEFAULT);
+    assert!(config.ui.show_shortcut_hints);
+    assert!(!config.ui.shortcut_coach_seen);
+}
+
+#[test]
+fn load_config_should_default_sidebar_collapsed_when_ui_section_omits_it() {
+    let (_temp, session) = session_with_toml(
+        r#"
+[ui]
+sidebar_width = 300.0
+"#,
+    );
+    let config = session.load_config().expect("load config");
+    assert_eq!(config.ui.sidebar_width, 300.0);
+    assert!(config.ui.sidebar_collapsed);
+    assert_eq!(config.ui.scale, UI_SCALE_DEFAULT);
+    assert!(config.ui.show_shortcut_hints);
+    assert!(!config.ui.shortcut_coach_seen);
 }
 
 #[test]
@@ -85,6 +119,7 @@ fn sidebar_layout_should_persist_across_config_reload() {
             ui: UiConfig {
                 sidebar_width: 300.0,
                 sidebar_collapsed: true,
+                ..UiConfig::default()
             },
             ..RoninConfig::default()
         })

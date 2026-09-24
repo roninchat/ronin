@@ -4,7 +4,7 @@ use gpui::{
     div, hsla, img, point, prelude::*, px, size, App, Application, Bounds, ClipboardEntry, Context,
     DragMoveEvent, ExternalPaths, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollHandle, SharedString, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions,
+    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowHandle, WindowOptions,
 };
 use ronin::{
     acquire_instance,
@@ -13,9 +13,12 @@ use ronin::{
         save_code_block_as_snippet_label, snippet_title_from_language, ArtifactsPanelState,
         ARTIFACT_KIND_BADGE,
     },
+    assets::{bundled_font_bytes, RoninAssets},
     attachment_preview::{preview_from_attachment, preview_from_draft, AttachmentPreview},
     attachment_size::{AttachmentSizeWarnState, DEFAULT_ATTACHMENT_WARN_CHARS},
+    chrome::{ICON_RAIL_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH},
     clipboard_watch::ArboardClipboardSource,
+    command_palette::CommandPaletteState,
     completions,
     composer::ComposerEditor,
     composer_ingest::{
@@ -26,7 +29,8 @@ use ronin::{
         PickerKind, SlashActionKind,
     },
     context_indicator::{
-        fill_level_color, project_context_indicator, ContextEstimateInput, ContextIndicator,
+        context_indicator_visible, fill_level_color, project_context_indicator,
+        ContextEstimateInput, ContextIndicator,
     },
     desktop_notifications::PortalDesktopNotifier,
     folder_attach::{
@@ -38,6 +42,7 @@ use ronin::{
         thread_title_document, SearchContentKind, SearchDatePreset, SearchDocument, SearchHit,
         SearchPanelState,
     },
+    icons::{icon, IconName},
     instance_runtime_dir,
     keyboard_nav::{
         shortcut_catalog, FocusRegion, KeyInput, KeyboardNavState, NavAction, ScrollDirection,
@@ -58,6 +63,8 @@ use ronin::{
     },
     ronin_paths,
     screenshot_capture::PortalOrFallbackScreenshotCapturer,
+    settings_view::SettingsState,
+    theme::ui_font_family,
     theme::{resolve_shell_theme, M0Theme},
     thread_titles::{
         format_sidebar_thread_title, title_generation_status_label, ThreadRenameState,
@@ -76,12 +83,13 @@ use ronin_app::{
 use ronin_core::{
     clamp_sidebar_width, clipboard_attachment, list_folder_entries_with_options,
     list_folder_entries_with_policy, parse_context_tools, read_file_attachment,
-    screenshot_attachment, ChatProvider, ContextAttachmentDraft, ContextToolRef,
-    DesktopNotifier, HttpOllamaProvider, MessageRole, MessageStatus, ScreenshotCapturer,
-    ThemePreference,
+    screenshot_attachment, ChatProvider, ContextAttachmentDraft, ContextToolRef, DesktopNotifier,
+    HttpOllamaProvider, MessageRole, MessageStatus, ScreenshotCapturer, ThemePreference,
+    UI_SCALE_DEFAULT,
 };
 
 mod quick_overlay;
+mod shell_chrome;
 
 fn main() -> ExitCode {
     match run() {
@@ -128,38 +136,43 @@ fn run() -> Result<(), RunError> {
     let _ = shell.refresh_provider_status();
     tracing::info!(intent = ?intent, "ronin launch intent parsed");
 
-    Application::new().run(move |cx: &mut App| {
-        if is_quick {
-            match quick_overlay::open_quick_overlay_window(
-                cx,
-                shell,
-                Some(instance_primary),
-                None,
-                None,
-            ) {
+    Application::new()
+        .with_assets(RoninAssets)
+        .run(move |cx: &mut App| {
+            if let Err(error) = cx.text_system().add_fonts(bundled_font_bytes()) {
+                tracing::warn!(%error, "failed to load bundled Inter fonts");
+            }
+            if is_quick {
+                match quick_overlay::open_quick_overlay_window(
+                    cx,
+                    shell,
+                    Some(instance_primary),
+                    None,
+                    None,
+                ) {
+                    Ok(_) => {
+                        tracing::info!("ronin quick overlay opened");
+                        cx.activate(true);
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "failed to open ronin quick overlay");
+                        cx.quit();
+                    }
+                }
+                return;
+            }
+
+            match open_main_window(cx, shell, Some(instance_primary), attach_paths, None) {
                 Ok(_) => {
-                    tracing::info!("ronin quick overlay opened");
+                    tracing::info!("ronin native window opened");
                     cx.activate(true);
                 }
                 Err(error) => {
-                    tracing::error!(%error, "failed to open ronin quick overlay");
+                    tracing::error!(%error, "failed to open ronin native window");
                     cx.quit();
                 }
             }
-            return;
-        }
-
-        match open_main_window(cx, shell, Some(instance_primary), attach_paths, None) {
-            Ok(_) => {
-                tracing::info!("ronin native window opened");
-                cx.activate(true);
-            }
-            Err(error) => {
-                tracing::error!(%error, "failed to open ronin native window");
-                cx.quit();
-            }
-        }
-    });
+        });
 
     Ok(())
 }
@@ -186,13 +199,17 @@ pub(crate) fn open_main_window(
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
                 title: Some(SharedString::from("Ronin")),
+                appears_transparent: true,
                 ..Default::default()
             }),
+            window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
+            window_decorations: Some(WindowDecorations::Client),
             ..Default::default()
         },
         |window, cx| {
             cx.new(|cx| {
-                let rem = 14.0; // default rem in pixels for GPUI 0.2.x
+                let ui_scale = shell.ui_scale();
+                let rem = 14.0 * ui_scale;
                 let mut composer = ComposerEditor::new();
                 composer.set_font_metrics_from_rem(rem);
                 let _appearance_subscription =
@@ -201,6 +218,20 @@ pub(crate) fn open_main_window(
                     });
                 let sidebar_width = shell.sidebar_width();
                 let sidebar_collapsed = shell.sidebar_collapsed();
+                let theme_preference = shell
+                    .session()
+                    .load_config()
+                    .map(|config| config.theme)
+                    .unwrap_or(ThemePreference::System);
+                let memories_enabled = shell.features_memories_enabled();
+                let artifacts_enabled = shell.features_artifacts_enabled();
+                let show_shortcut_hints = shell.show_shortcut_hints();
+                let coach_seen = shell.shortcut_coach_seen();
+                let (notifications_enabled, auto_title) = shell
+                    .session()
+                    .load_config()
+                    .map(|config| (config.notifications.enabled, config.general.auto_title))
+                    .unwrap_or((true, true));
                 RoninWindow {
                     shell,
                     composer,
@@ -254,6 +285,19 @@ pub(crate) fn open_main_window(
                     model_picker: ModelPickerState::default(),
                     model_picker_entries: Vec::new(),
                     quick_overlay: None,
+                    chrome_menu: None,
+                    command_palette: CommandPaletteState::new(),
+                    palette_editor: ComposerEditor::new(),
+                    palette_focus: cx.focus_handle(),
+                    settings: SettingsState::new(),
+                    theme_preference,
+                    ui_scale,
+                    memories_enabled,
+                    artifacts_enabled,
+                    show_shortcut_hints,
+                    coach_seen,
+                    notifications_enabled,
+                    auto_title,
                     _appearance_subscription,
                 }
             })
@@ -331,7 +375,38 @@ struct RoninWindow {
     model_picker_entries: Vec<ModelPickerEntry>,
     /// Open compact quick-mode overlay, if any.
     quick_overlay: Option<WindowHandle<quick_overlay::QuickModeWindow>>,
+    chrome_menu: Option<ChromeMenu>,
+    command_palette: CommandPaletteState,
+    palette_editor: ComposerEditor,
+    palette_focus: FocusHandle,
+    settings: SettingsState,
+    theme_preference: ThemePreference,
+    ui_scale: f32,
+    memories_enabled: bool,
+    artifacts_enabled: bool,
+    show_shortcut_hints: bool,
+    coach_seen: bool,
+    notifications_enabled: bool,
+    auto_title: bool,
     _appearance_subscription: Subscription,
+}
+
+#[derive(Debug, Clone)]
+enum ChromeMenu {
+    Window,
+    Thread {
+        id: String,
+    },
+    Message {
+        id: String,
+        thread_id: String,
+        content: String,
+        is_assistant: bool,
+        is_failed: bool,
+        is_last_assistant: bool,
+        can_edit: bool,
+    },
+    Plus,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -339,9 +414,6 @@ struct SidebarDrag {
     start_x: f32,
     start_width: f32,
 }
-
-/// Narrow rail width when the sidebar is collapsed (expand affordance).
-const SIDEBAR_COLLAPSED_RAIL: f32 = 40.0;
 
 impl RoninWindow {
     fn selected_thread_workspace_root(&self) -> Option<std::path::PathBuf> {
@@ -1163,7 +1235,12 @@ impl RoninWindow {
     }
 
     fn active_picker(&self) -> Option<ActivePicker> {
-        let picker = detect_active_picker(self.composer.text(), self.composer.cursor())?;
+        let mut picker = detect_active_picker(self.composer.text(), self.composer.cursor())?;
+        picker.items.retain(|item| match item.at_kind() {
+            Some(AtAttachmentKind::Memory) => self.memories_enabled,
+            Some(AtAttachmentKind::Artifact) => self.artifacts_enabled,
+            _ => true,
+        });
         let key = Self::picker_suppress_key(&picker);
         if self.picker_suppressed.as_deref() == Some(key.as_str()) {
             return None;
@@ -1196,6 +1273,9 @@ impl RoninWindow {
     }
 
     fn memory_completions(&self) -> Vec<(String, String)> {
+        if !self.memories_enabled {
+            return Vec::new();
+        }
         let prefix = match completions::memory_completion_prefix(
             self.composer.text(),
             self.composer.cursor(),
@@ -1214,6 +1294,9 @@ impl RoninWindow {
     }
 
     fn artifact_completions(&self) -> Vec<(String, String)> {
+        if !self.artifacts_enabled {
+            return Vec::new();
+        }
         let prefix = match completions::artifact_completion_prefix(
             self.composer.text(),
             self.composer.cursor(),
@@ -2268,6 +2351,21 @@ impl RoninWindow {
     ) {
         let keystroke = &event.keystroke;
 
+        // Palette / settings / chrome menus capture keys first.
+        if self.command_palette.is_open() {
+            self.on_palette_key_down(event, window, cx);
+            return;
+        }
+        if self.settings.is_open() && keystroke.key.as_str() == "escape" {
+            self.close_settings(cx);
+            return;
+        }
+        if keystroke.key.as_str() == "escape" && self.chrome_menu.is_some() {
+            self.chrome_menu = None;
+            cx.notify();
+            return;
+        }
+
         // Model picker captures navigation while open
         if self.model_picker.is_open() {
             let count = self.model_picker_entries.len();
@@ -2293,7 +2391,11 @@ impl RoninWindow {
         };
 
         // Global focus / help chords (work from any region; Ctrl+B remains collapse)
-        let global_nav = input.control && matches!(input.key, "1" | "2" | "3" | "/" | "?" | "f")
+        let global_nav = input.control
+            && matches!(
+                input.key,
+                "1" | "2" | "3" | "/" | "?" | "f" | "p" | "=" | "+" | "-" | "0"
+            )
             || (input.key == "escape"
                 && (self.keyboard_nav.help_visible() || self.search_panel.is_open()));
         if global_nav {
@@ -2330,6 +2432,7 @@ impl RoninWindow {
             }
             "escape" => self.cancel_generation(cx),
             "b" if keystroke.modifiers.control => self.toggle_sidebar(cx),
+            "," | "comma" if keystroke.modifiers.control => self.open_settings(window, cx),
             _ => {}
         }
     }
@@ -2422,6 +2525,12 @@ impl RoninWindow {
                 self.scroll_message_list(direction);
                 cx.notify();
             }
+            NavAction::TogglePalette => self.toggle_quick_palette(window, cx),
+            NavAction::ToggleCommandPalette => self.toggle_command_palette(window, cx),
+            NavAction::ZoomIn => self.apply_zoom_delta(0.1, cx),
+            NavAction::ZoomOut => self.apply_zoom_delta(-0.1, cx),
+            NavAction::ZoomReset => self.apply_zoom_value(UI_SCALE_DEFAULT, cx),
+            NavAction::ToggleWindowMenu => self.toggle_window_menu(cx),
         }
     }
 
@@ -2699,57 +2808,7 @@ impl RoninWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         if self.sidebar_collapsed {
-            let focus_border = if sidebar_focused {
-                theme.accent
-            } else {
-                theme.border_subtle
-            };
-            return div()
-                .w(px(SIDEBAR_COLLAPSED_RAIL))
-                .h_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_2()
-                .p_2()
-                .bg(theme.sidebar_background)
-                .border_r_2()
-                .border_color(focus_border)
-                .shadow(elevation_style(Elevation::Medium, theme.color_scheme).box_shadows())
-                .track_focus(&self.sidebar_focus)
-                .child(
-                    div()
-                        .rounded_md()
-                        .px_2()
-                        .py_2()
-                        .text_sm()
-                        .text_color(theme.text_primary)
-                        .cursor_pointer()
-                        .hover(|style| style.bg(theme.surface_hover))
-                        .child("»")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
-                        ),
-                )
-                .child(
-                    div()
-                        .rounded_md()
-                        .px_2()
-                        .py_2()
-                        .text_sm()
-                        .text_color(theme.text_primary)
-                        .cursor_pointer()
-                        .hover(|style| style.bg(theme.surface_hover))
-                        .child("⌕")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.toggle_search_panel(window, cx);
-                            }),
-                        ),
-                )
-                .into_any_element();
+            return div().into_any_element();
         }
 
         let selected_thread_id = self.shell.state().selected_thread_id.clone();
@@ -2757,7 +2816,6 @@ impl RoninWindow {
         let truncation_notice = self.shell.state().truncation_notice;
         let title_generating = self.shell.state().title_generating_thread_id.is_some();
         let generating_ids = self.shell.active_generating_thread_ids();
-        let on_new_chat = cx.listener(Self::create_new_thread);
         let threads_empty = threads.is_empty();
 
         let mut thread_list = div().flex().flex_col().gap_2().min_w_0().w_full();
@@ -2861,9 +2919,52 @@ impl RoninWindow {
                             );
                     }
                 } else {
+                    let overflow_open = matches!(
+                        &self.chrome_menu,
+                        Some(ChromeMenu::Thread { id }) if *id == thread_id
+                    );
                     row = row
-                        .truncate()
-                        .child(format_sidebar_thread_title(&thread.title, is_generating));
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div().flex_1().min_w_0().overflow_hidden().child(
+                                div().whitespace_nowrap().child(format_sidebar_thread_title(
+                                    &thread.title,
+                                    is_generating,
+                                )),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .relative()
+                                .flex_shrink_0()
+                                .occlude()
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("thread-more-{thread_id}")))
+                                        .size(px(24.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(theme.surface_hover))
+                                        .on_mouse_down(MouseButton::Left, {
+                                            let id = thread_id.clone();
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.chrome_menu =
+                                                    Some(ChromeMenu::Thread { id: id.clone() });
+                                                cx.notify();
+                                            })
+                                        })
+                                        .child(icon(IconName::Ellipsis, theme.text_muted, 14.0)),
+                                )
+                                .when(overflow_open, |el| {
+                                    el.child(self.render_thread_overflow(theme, cx))
+                                }),
+                        );
                 }
 
                 if is_highlighted {
@@ -2925,111 +3026,10 @@ impl RoninWindow {
             )
             .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(FontWeight(600.))
-                            .text_color(theme.text_primary)
-                            .truncate()
-                            .child("Ronin"),
-                    )
-                    .child(
-                        div()
-                            .rounded_md()
-                            .px_2()
-                            .py_1()
-                            .text_xs()
-                            .text_color(theme.text_muted)
-                            .cursor_pointer()
-                            .hover(|style| {
-                                style.bg(theme.surface_hover).text_color(theme.text_primary)
-                            })
-                            .child("«")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .rounded_lg()
-                    .px_3()
-                    .py_2()
-                    .bg(theme.accent)
-                    .text_color(theme.accent_text)
-                    .font_weight(FontWeight(500.))
-                    .truncate()
-                    .child("New Chat")
-                    .hover(|style| style.bg(theme.accent_hover).cursor_pointer())
-                    .on_mouse_up(MouseButton::Left, on_new_chat),
-            )
-            .child(
-                div()
-                    .rounded_lg()
-                    .px_3()
-                    .py_2()
-                    .bg(theme.surface_muted)
-                    .text_color(theme.text_primary)
-                    .font_weight(FontWeight(500.))
-                    .truncate()
-                    .child("Memories")
-                    .hover(|style| style.bg(theme.surface_hover).cursor_pointer())
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.memories_panel_open = !this.memories_panel_open;
-                            if this.memories_panel_open {
-                                this.memory_management.open();
-                            } else {
-                                this.memory_management.close();
-                            }
-                            cx.notify();
-                        }),
-                    ),
-            )
-            .child(
-                div()
-                    .rounded_lg()
-                    .px_3()
-                    .py_2()
-                    .bg(theme.surface_muted)
-                    .text_color(theme.text_primary)
-                    .font_weight(FontWeight(500.))
-                    .truncate()
-                    .child("Artifacts")
-                    .hover(|style| style.bg(theme.surface_hover).cursor_pointer())
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.artifacts_panel_open = !this.artifacts_panel_open;
-                            cx.notify();
-                        }),
-                    ),
-            )
-            .child(
-                div()
-                    .rounded_lg()
-                    .px_3()
-                    .py_2()
-                    .bg(theme.surface_muted)
-                    .text_color(theme.text_primary)
-                    .font_weight(FontWeight(500.))
-                    .truncate()
-                    .child("Search")
-                    .hover(|style| style.bg(theme.surface_hover).cursor_pointer())
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.toggle_search_panel(window, cx);
-                        }),
-                    ),
+                    .text_sm()
+                    .font_weight(FontWeight(600.))
+                    .text_color(theme.text_muted)
+                    .child("Recents"),
             )
             .child(
                 div()
@@ -3064,20 +3064,7 @@ impl RoninWindow {
                         div()
                     }),
             )
-            .child(
-                div()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme.border_subtle)
-                    .bg(theme.surface_muted)
-                    .p_3()
-                    .text_sm()
-                    .text_color(theme.text_muted)
-                    .min_w_0()
-                    .overflow_hidden()
-                    .shadow(elevation_style(Elevation::Low, theme.color_scheme).box_shadows())
-                    .child(self.render_provider_status(self.shell.state(), theme, cx)),
-            )
+            .child(self.compact_provider_footer(theme, cx))
             .child(resize_handle)
             .into_any_element()
     }
@@ -3240,7 +3227,6 @@ impl RoninWindow {
                 let is_search_match = scroll_target.as_deref() == Some(msg.id.as_str());
                 let raw_content = msg.content.clone();
                 let is_copied = self.copied_state.as_ref().map(|(id, _)| id) == Some(&msg.id);
-                let copy_text = if is_copied { "Copied!" } else { "Copy" };
                 let editing_this = self
                     .message_edit
                     .editing()
@@ -3270,6 +3256,9 @@ impl RoninWindow {
                         let block_el = match block {
                             ronin::markdown::MarkdownBlock::Paragraph(inlines) => {
                                 ronin::markdown_view::render_inline_flow(&inlines, theme)
+                            }
+                            ronin::markdown::MarkdownBlock::Heading { level, inlines } => {
+                                ronin::markdown_view::render_heading(level, &inlines, theme)
                             }
                             ronin::markdown::MarkdownBlock::CodeBlock { language, content } => {
                                 let lang_label = language
@@ -3414,20 +3403,29 @@ impl RoninWindow {
                 } // !editing_this
 
                 let is_last_assistant = Some(&msg.id) == last_assistant_id.as_ref();
+                let is_assistant = msg.role == MessageRole::Assistant;
+                let is_failed = msg.status == ronin_core::MessageStatus::Failed
+                    || msg.status == ronin_core::MessageStatus::Error;
+                let can_edit = msg.role == MessageRole::User && !editing_this && !is_generating;
+                let overflow_open = matches!(
+                    &self.chrome_menu,
+                    Some(ChromeMenu::Message { id, .. }) if *id == msg.id
+                );
                 let mut message_actions = div()
                     .flex()
                     .flex_row()
-                    .gap_3()
+                    .items_center()
+                    .gap_1()
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(if is_copied {
-                                theme.text_primary
-                            } else {
-                                theme.accent
-                            })
+                            .id(SharedString::from(format!("copy-{}", msg.id)))
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
                             .cursor_pointer()
-                            .child(copy_text)
+                            .hover(|style| style.bg(theme.surface_hover))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener({
@@ -3441,46 +3439,63 @@ impl RoninWindow {
                                         );
                                     }
                                 }),
-                            ),
+                            )
+                            .child(icon(
+                                if is_copied {
+                                    IconName::Check
+                                } else {
+                                    IconName::Copy
+                                },
+                                if is_copied {
+                                    theme.text_primary
+                                } else {
+                                    theme.text_muted
+                                },
+                                14.0,
+                            )),
                     )
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(theme.accent)
-                            .cursor_pointer()
-                            .child("Save as memory")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener({
-                                    let raw_content = raw_content.clone();
-                                    move |this, _, _, cx| {
-                                        this.save_as_memory(raw_content.clone(), cx);
-                                    }
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.accent)
-                            .cursor_pointer()
-                            .child("Save as artifact")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener({
-                                    let thread_id = msg.thread_id.clone();
-                                    let msg_id = msg.id.clone();
-                                    let raw_content = raw_content.clone();
-                                    move |this, _, _, cx| {
-                                        this.save_as_artifact(
-                                            thread_id.clone(),
-                                            msg_id.clone(),
-                                            raw_content.clone(),
-                                            cx,
-                                        );
-                                    }
-                                }),
-                            ),
+                            .relative()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("msg-more-{}", msg.id)))
+                                    .size(px(24.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(theme.surface_hover))
+                                    .on_mouse_down(MouseButton::Left, {
+                                        let id = msg.id.clone();
+                                        let thread_id = msg.thread_id.clone();
+                                        let content = raw_content.clone();
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.chrome_menu = Some(ChromeMenu::Message {
+                                                id: id.clone(),
+                                                thread_id: thread_id.clone(),
+                                                content: content.clone(),
+                                                is_assistant,
+                                                is_failed,
+                                                is_last_assistant,
+                                                can_edit,
+                                            });
+                                            cx.notify();
+                                        })
+                                    })
+                                    .child(icon(IconName::Ellipsis, theme.text_muted, 14.0)),
+                            )
+                            .when(overflow_open, |el| {
+                                el.child(self.render_message_overflow(
+                                    theme,
+                                    is_assistant,
+                                    is_failed,
+                                    is_last_assistant,
+                                    can_edit,
+                                    cx,
+                                ))
+                            }),
                     );
 
                 if msg.role == MessageRole::User {
@@ -3551,32 +3566,6 @@ impl RoninWindow {
                                         ),
                                 );
                         }
-                    } else {
-                        message_actions = message_actions.child(
-                            div()
-                                .text_xs()
-                                .text_color(if is_generating {
-                                    theme.text_muted
-                                } else {
-                                    theme.accent
-                                })
-                                .cursor_pointer()
-                                .child("Edit")
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener({
-                                        let msg_id = msg.id.clone();
-                                        let content = raw_content.clone();
-                                        move |this, _, window, cx| {
-                                            if !this.shell.is_generation_active() {
-                                                this.begin_message_edit(
-                                                    &msg_id, &content, window, cx,
-                                                );
-                                            }
-                                        }
-                                    }),
-                                ),
-                        );
                     }
                 }
 
@@ -3657,14 +3646,14 @@ impl RoninWindow {
                     message_body = message_body.child(self.render_error_presentation(&err, theme));
                     message_actions = message_actions.child(
                         div()
-                            .text_xs()
-                            .text_color(if is_generating {
-                                theme.text_muted
-                            } else {
-                                theme.accent
-                            })
+                            .id(SharedString::from(format!("retry-{}", msg.id)))
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
                             .cursor_pointer()
-                            .child("Retry")
+                            .hover(|style| style.bg(theme.surface_hover))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener({
@@ -3675,34 +3664,16 @@ impl RoninWindow {
                                         }
                                     }
                                 }),
-                            ),
-                    );
-                }
-
-                if is_last_assistant
-                    && (msg.status == ronin_core::MessageStatus::Complete
-                        || msg.status == ronin_core::MessageStatus::Cancelled)
-                {
-                    message_actions = message_actions.child(
-                        div()
-                            .text_xs()
-                            .text_color(if is_generating {
-                                theme.text_muted
-                            } else {
-                                theme.accent
-                            })
-                            .cursor_pointer()
-                            .child("Regenerate")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener({
-                                    move |this, _, _, cx| {
-                                        if !this.shell.is_generation_active() {
-                                            this.regenerate_last_assistant(cx);
-                                        }
-                                    }
-                                }),
-                            ),
+                            )
+                            .child(icon(
+                                IconName::Refresh,
+                                if is_generating {
+                                    theme.text_muted
+                                } else {
+                                    theme.accent
+                                },
+                                14.0,
+                            )),
                     );
                 }
 
@@ -3810,56 +3781,6 @@ impl RoninWindow {
             .gap_2()
             .can_drop(|value, _, _| value.is::<ExternalPaths>())
             .on_drop(cx.listener(Self::on_external_paths_drop));
-
-        // Screenshot actions (interactive + window-targeted when portal supports it)
-        composer = composer.child(
-            div()
-                .flex()
-                .flex_row()
-                .gap_2()
-                .child(
-                    div()
-                        .rounded_lg()
-                        .px_3()
-                        .py_1()
-                        .bg(theme.surface_muted)
-                        .text_xs()
-                        .text_color(theme.text_primary)
-                        .cursor_pointer()
-                        .child("Screenshot")
-                        .hover(|style| style.bg(theme.surface_hover))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.take_screenshot_action(cx);
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .rounded_lg()
-                        .px_3()
-                        .py_1()
-                        .bg(theme.surface_muted)
-                        .text_xs()
-                        .text_color(theme.text_primary)
-                        .cursor_pointer()
-                        .child("Window")
-                        .hover(|style| style.bg(theme.surface_hover))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                this.take_window_screenshot_action(cx);
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.text_muted)
-                        .child("or type @screenshot"),
-                ),
-        );
 
         // Folder attach file selection
         if !self.pending_folder_attaches.is_empty() {
@@ -4117,9 +4038,13 @@ impl RoninWindow {
         }
 
         // Unobtrusive context/token size indicator
-        composer = composer.child(self.render_context_indicator(theme));
-        if let Some(memory_ind) = self.render_memory_context_indicator(theme) {
-            composer = composer.child(memory_ind);
+        if context_indicator_visible(&self.current_context_indicator()) {
+            composer = composer.child(self.render_context_indicator(theme));
+        }
+        if self.memories_enabled {
+            if let Some(memory_ind) = self.render_memory_context_indicator(theme) {
+                composer = composer.child(memory_ind);
+            }
         }
 
         // @ attachment / / action picker dropdown
@@ -4328,65 +4253,107 @@ impl RoninWindow {
         if cursor_line >= lines.len().saturating_sub(1) {
             self.composer_scroll_handle.scroll_to_bottom();
         }
+        let plus_open = matches!(self.chrome_menu, Some(ChromeMenu::Plus));
         composer.child(
-            div()
-                .flex()
-                .items_end()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .rounded_xl()
-                        .border_2()
-                        .border_color(border_color)
-                        .bg(theme.composer_background)
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .id("composer")
-                        .overflow_y_scroll()
-                        .track_scroll(&self.composer_scroll_handle)
-                        .max_h(px(max_input_h))
-                        .cursor_text()
-                        .shadow(
-                            elevation_style(Elevation::Medium, theme.color_scheme).box_shadows(),
-                        )
-                        .track_focus(&self.composer_focus)
-                        .on_key_down(cx.listener(Self::on_composer_key_down))
-                        .on_mouse_down(MouseButton::Left, cx.listener(Self::on_composer_mouse_down))
-                        .on_mouse_move(cx.listener(Self::on_composer_mouse_move))
-                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_composer_mouse_up))
-                        .child(self.composer.render_text(
-                            "Ask Ronin anything…",
-                            theme.text_primary,
-                            theme.text_muted,
-                            theme.accent,
-                        )),
-                )
-                .child(
-                    div()
-                        .rounded_lg()
-                        .px_4()
-                        .py_2()
-                        .bg(send_btn_bg)
-                        .text_color(theme.accent_text)
-                        .font_weight(FontWeight(500.))
-                        .child("Send")
-                        .hover(|style| {
-                            if !is_generating {
-                                style.bg(theme.accent_hover).cursor_pointer()
-                            } else {
-                                style
-                            }
-                        })
-                        .on_mouse_up(MouseButton::Left, {
-                            cx.listener(move |this, _event, _window, cx| {
-                                if !this.shell.is_generation_active() {
-                                    this.send_current_message(cx);
+            div().flex().items_end().gap_2().child(
+                div()
+                    .flex_1()
+                    .rounded_2xl()
+                    .border_2()
+                    .border_color(border_color)
+                    .bg(theme.composer_background)
+                    .px_2()
+                    .py_2()
+                    .flex()
+                    .flex_row()
+                    .items_end()
+                    .gap_1()
+                    .shadow(elevation_style(Elevation::Medium, theme.color_scheme).box_shadows())
+                    .child(
+                        div()
+                            .relative()
+                            .flex_shrink_0()
+                            .child(
+                                div()
+                                    .id("composer-plus")
+                                    .size(px(32.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(theme.surface_hover))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.chrome_menu = if matches!(
+                                                this.chrome_menu,
+                                                Some(ChromeMenu::Plus)
+                                            ) {
+                                                None
+                                            } else {
+                                                Some(ChromeMenu::Plus)
+                                            };
+                                            cx.notify();
+                                        }),
+                                    )
+                                    .child(icon(IconName::Plus, theme.text_muted, 16.0)),
+                            )
+                            .when(plus_open, |el| el.child(self.render_plus_menu(theme, cx))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px_2()
+                            .py_1()
+                            .id("composer-input")
+                            .overflow_y_scroll()
+                            .track_scroll(&self.composer_scroll_handle)
+                            .max_h(px(max_input_h))
+                            .cursor_text()
+                            .track_focus(&self.composer_focus)
+                            .on_key_down(cx.listener(Self::on_composer_key_down))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(Self::on_composer_mouse_down),
+                            )
+                            .on_mouse_move(cx.listener(Self::on_composer_mouse_move))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_composer_mouse_up))
+                            .child(self.composer.render_text(
+                                "Ask Ronin anything…",
+                                theme.text_primary,
+                                theme.text_muted,
+                                theme.accent,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .id("composer-send")
+                            .size(px(32.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(send_btn_bg)
+                            .flex_shrink_0()
+                            .hover(|style| {
+                                if !is_generating {
+                                    style.bg(theme.accent_hover).cursor_pointer()
+                                } else {
+                                    style
                                 }
                             })
-                        }),
-                ),
+                            .on_mouse_up(MouseButton::Left, {
+                                cx.listener(move |this, _event, _window, cx| {
+                                    if !this.shell.is_generation_active() {
+                                        this.send_current_message(cx);
+                                    }
+                                })
+                            })
+                            .child(icon(IconName::Send, theme.accent_text, 16.0)),
+                    ),
+            ),
         )
     }
 
@@ -5772,14 +5739,10 @@ impl Render for RoninWindow {
             self.needs_initial_focus = false;
             window.focus(&self.composer_focus);
         }
-        let theme_preference = self
-            .shell
-            .session()
-            .load_config()
-            .map(|config| config.theme)
-            .unwrap_or(ThemePreference::System);
-        let theme = resolve_shell_theme(theme_preference, window.appearance());
-        let composer_focused = self.composer_focus.is_focused(window);
+        window.set_rem_size(px(16.0 * self.ui_scale));
+        let theme = resolve_shell_theme(self.theme_preference, window.appearance());
+        let composer_focused =
+            self.composer_focus.is_focused(window) || self.palette_focus.is_focused(window);
         let sidebar_focused = self.sidebar_focus.is_focused(window)
             || self.keyboard_nav.focus() == FocusRegion::Sidebar;
         let messages_focused = self.messages_focus.is_focused(window)
@@ -5845,129 +5808,78 @@ impl Render for RoninWindow {
             }
         }
 
-        // Estimate composer text container width for layout
-        let rem = self.composer_rem;
-        let sidebar_w = if self.sidebar_collapsed {
-            SIDEBAR_COLLAPSED_RAIL
+        // Estimate composer text container width from live window bounds
+        let window_w: f32 = window.bounds().size.width.into();
+        let rail_w = ICON_RAIL_WIDTH;
+        let recents_w = if self.sidebar_collapsed {
+            0.0
         } else {
             self.sidebar_width
         };
-        let outer_pad = rem * 6.0 * 2.0; // p_6 left+right
-        let inner_pad = rem * 4.0 * 2.0; // p_4 left+right
-        let border_w = 4.0; // border_2
-        let send_btn_w = 80.0;
-        let gap_w = rem * 0.5; // gap_2
-        let text_w = 1120.0 - sidebar_w - outer_pad - inner_pad - border_w - send_btn_w - gap_w;
+        let chrome_w = rail_w + recents_w + 48.0 + 36.0 + 36.0;
+        let text_w = window_w - chrome_w;
         self.composer.set_container_width(text_w.max(100.0));
 
-        let sidebar = self.render_sidebar(&theme, sidebar_focused, cx);
-        let title = Self::current_thread_title(self.shell.state())
+        let titlebar_title = Self::current_thread_title(self.shell.state())
             .map(|t| t.to_string())
             .unwrap_or_else(|| "New Chat".to_string());
+        window.set_window_title(&titlebar_title);
+        let titlebar = self.render_titlebar(&theme, &titlebar_title, window, cx);
+        let icon_rail = self.render_icon_rail(&theme, sidebar_focused, cx);
+        let recents = if self.sidebar_collapsed {
+            None
+        } else {
+            Some(self.render_sidebar(&theme, sidebar_focused, cx))
+        };
         let messages = self.render_messages(&theme, messages_focused, cx);
         let composer = self.render_composer(&theme, composer_focused, cx);
+
+        let main_col = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .can_drop(|value, _, _| value.is::<ExternalPaths>())
+            .on_drop(cx.listener(Self::on_external_paths_drop))
+            .child(messages)
+            .child(composer);
+
+        let mut body = div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_row()
+            .child(icon_rail);
+        if let Some(recents) = recents {
+            body = body.child(recents);
+        }
+        body = body.child(main_col);
 
         let mut ui = div()
             .id("ronin-root")
             .relative()
             .size_full()
             .flex()
+            .flex_col()
             .bg(theme.app_background)
             .text_color(theme.text_primary)
-            .font_family("Inter")
+            .font_family(ui_font_family())
             .on_key_down(cx.listener(Self::on_global_key_down))
             .on_mouse_move(cx.listener(Self::on_sidebar_resize_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_sidebar_resize_up))
             .can_drop(|value, _, _| value.is::<ExternalPaths>())
             .on_drag_move(cx.listener(Self::on_external_paths_drag_move))
             .on_drop(cx.listener(Self::on_external_paths_drop))
-            .child(sidebar)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .can_drop(|value, _, _| value.is::<ExternalPaths>())
-                    .on_drop(cx.listener(Self::on_external_paths_drop))
-                    .child(
-                        div()
-                            .border_b_1()
-                            .border_color(theme.border_subtle)
-                            .px_6()
-                            .py_4()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .child(div().truncate().child(title))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_3()
-                                    .child({
-                                        let model_label = self
-                                            .active_model_name()
-                                            .unwrap_or("Select model")
-                                            .to_string();
-                                        div()
-                                            .text_xs()
-                                            .rounded_md()
-                                            .px_2()
-                                            .py_1()
-                                            .bg(theme.surface_muted)
-                                            .text_color(theme.text_primary)
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(theme.surface_hover))
-                                            .child(format!("Model: {model_label}"))
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, _, cx| {
-                                                    this.open_model_picker();
-                                                    cx.notify();
-                                                }),
-                                            )
-                                    })
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.text_muted)
-                                            .cursor_pointer()
-                                            .hover(|s| s.text_color(theme.accent))
-                                            .child("Shortcuts (Ctrl+/)")
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                cx.listener(|this, _, _, cx| {
-                                                    let input = KeyInput {
-                                                        key: "/",
-                                                        control: true,
-                                                        shift: false,
-                                                        alt: false,
-                                                    };
-                                                    let count = this.thread_count();
-                                                    let (_, action) =
-                                                        this.keyboard_nav.handle_key(input, count);
-                                                    if matches!(action, NavAction::ToggleHelp) {
-                                                        cx.notify();
-                                                    }
-                                                }),
-                                            ),
-                                    ),
-                            ),
-                    )
-                    .child(messages)
-                    .child(composer),
-            );
+            .child(titlebar)
+            .child(body);
 
-        if self.memories_panel_open {
+        if self.memories_panel_open && self.memories_enabled {
             ui = ui.child(self.render_memories_panel(&theme, cx));
         }
 
-        if self.artifacts_panel_open {
+        if self.artifacts_panel_open && self.artifacts_enabled {
             ui = ui.child(self.render_artifacts_panel(&theme, cx));
         }
 
@@ -5984,6 +5896,18 @@ impl Render for RoninWindow {
             ui = ui.child(self.render_model_picker(&theme, cx));
         }
 
+        if self.command_palette.is_open() {
+            ui = ui.child(self.render_command_palette(&theme, cx));
+        }
+
+        if self.settings.is_open() {
+            ui = ui.child(self.render_settings_overlay(&theme, cx));
+        }
+
+        if let Some(coach) = self.render_shortcut_coach(&theme, cx) {
+            ui = ui.child(coach);
+        }
+
         if drop_overlay_should_show(self.file_drop_active) {
             ui = ui.child(self.render_drop_overlay(&theme, cx));
         }
@@ -5991,8 +5915,7 @@ impl Render for RoninWindow {
         let mut needs_frame = streaming_active
             || composer_focused
             || self.sidebar_drag.is_some()
-            || self.file_drop_active
-            || self.instance_primary.is_some();
+            || self.file_drop_active;
         if let Some((_, time)) = self.copied_state.as_ref() {
             if time.elapsed().as_secs_f32() >= 1.0 {
                 self.copied_state = None;

@@ -116,8 +116,15 @@ fn attachment_context_block(attachments: &[ContextAttachmentDraft]) -> Option<St
     )
 }
 
-/// Builds the always-on profile memory context block (enabled profile only).
+/// Builds the profile memory context block when the memories feature is on.
 fn profile_memory_context_block(session: &RoninSession) -> Option<String> {
+    let memories_on = session
+        .load_config()
+        .map(|c| c.features.memories)
+        .unwrap_or(false);
+    if !memories_on {
+        return None;
+    }
     let memories = session.list_memories().ok()?;
     let active: Vec<_> = memories
         .iter()
@@ -703,19 +710,101 @@ impl RoninShell {
             .map_err(Into::into)
     }
 
-    /// Imports provider settings from a TOML file (validates; preserves persona/theme/UI).
+    /// Imports provider settings from a TOML file (validates; preserves persona/theme/UI/features).
     pub fn import_provider_config_from_file(&self, path: &std::path::Path) -> Result<()> {
         self.session
             .import_provider_config_from_file(path)
             .map_err(Into::into)
     }
 
-    /// Whether the sidebar is collapsed.
+    /// Whether the sidebar is collapsed (icon rail). Defaults to collapsed.
     pub fn sidebar_collapsed(&self) -> bool {
         self.session
             .load_config()
             .map(|c| c.ui.sidebar_collapsed)
+            .unwrap_or(true)
+    }
+
+    /// Whether the memories product feature is enabled.
+    pub fn features_memories_enabled(&self) -> bool {
+        self.session
+            .load_config()
+            .map(|c| c.features.memories)
             .unwrap_or(false)
+    }
+
+    /// Whether the artifacts product feature is enabled.
+    pub fn features_artifacts_enabled(&self) -> bool {
+        self.session
+            .load_config()
+            .map(|c| c.features.artifacts)
+            .unwrap_or(false)
+    }
+
+    /// Persists the memories feature flag.
+    pub fn set_features_memories(&mut self, enabled: bool) -> Result<()> {
+        let mut config = self.session.load_config()?;
+        config.features.memories = enabled;
+        self.session.save_config(&config)?;
+        Ok(())
+    }
+
+    /// Persists the artifacts feature flag.
+    pub fn set_features_artifacts(&mut self, enabled: bool) -> Result<()> {
+        let mut config = self.session.load_config()?;
+        config.features.artifacts = enabled;
+        self.session.save_config(&config)?;
+        Ok(())
+    }
+
+    /// Current UI scale factor (clamped).
+    pub fn ui_scale(&self) -> f32 {
+        let scale = self
+            .session
+            .load_config()
+            .map(|c| c.ui.scale)
+            .unwrap_or(ronin_core::UI_SCALE_DEFAULT);
+        ronin_core::clamp_ui_scale(scale)
+    }
+
+    /// Sets and persists the UI scale factor (clamped).
+    pub fn set_ui_scale(&mut self, scale: f32) -> Result<()> {
+        let mut config = self.session.load_config()?;
+        config.ui.scale = ronin_core::clamp_ui_scale(scale);
+        self.session.save_config(&config)?;
+        Ok(())
+    }
+
+    /// Whether shortcut hint copy is shown in the chrome.
+    pub fn show_shortcut_hints(&self) -> bool {
+        self.session
+            .load_config()
+            .map(|c| c.ui.show_shortcut_hints)
+            .unwrap_or(true)
+    }
+
+    /// Sets and persists whether shortcut hint copy is shown.
+    pub fn set_show_shortcut_hints(&mut self, show: bool) -> Result<()> {
+        let mut config = self.session.load_config()?;
+        config.ui.show_shortcut_hints = show;
+        self.session.save_config(&config)?;
+        Ok(())
+    }
+
+    /// Whether the first-run shortcut coach has already been dismissed.
+    pub fn shortcut_coach_seen(&self) -> bool {
+        self.session
+            .load_config()
+            .map(|c| c.ui.shortcut_coach_seen)
+            .unwrap_or(false)
+    }
+
+    /// Marks the shortcut coach as seen and persists that preference.
+    pub fn mark_shortcut_coach_seen(&mut self) -> Result<()> {
+        let mut config = self.session.load_config()?;
+        config.ui.shortcut_coach_seen = true;
+        self.session.save_config(&config)?;
+        Ok(())
     }
 
     /// Sets and persists the preferred sidebar width (clamped).
@@ -1758,14 +1847,14 @@ impl RoninShell {
         Ok(())
     }
 
-    /// Creates a new memory with the given title and content.
+    /// Creates a new memory with the given title and content (starts disabled).
     pub fn create_memory(&self, title: &str, content: &str) -> Result<ronin_core::Memory> {
         self.session
             .create_memory(title, content)
             .map_err(Into::into)
     }
 
-    /// Creates a profile-group memory (auto-injected when enabled).
+    /// Creates a profile-group memory (enabled; injection requires the memories feature).
     pub fn create_profile_memory(&self, title: &str, content: &str) -> Result<ronin_core::Memory> {
         self.session
             .create_profile_memory(title, content)

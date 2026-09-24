@@ -1009,9 +1009,9 @@ impl RoninDb {
         Ok(())
     }
 
-    /// Creates and persists a new memory.
+    /// Creates and persists a new memory, disabled and not in the profile group.
     pub fn create_memory(&self, title: &str, content: &str) -> Result<DbMemory> {
-        self.create_memory_with_flags(title, content, true, false)
+        self.create_memory_with_flags(title, content, false, false)
     }
 
     /// Creates a memory with explicit enable and profile flags.

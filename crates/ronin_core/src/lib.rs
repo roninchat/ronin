@@ -37,12 +37,12 @@ pub use clipboard_watch::{
     CLIPBOARD_PROPOSAL_PREVIEW_CHARS,
 };
 pub use config::{
-    clamp_sidebar_width, effective_sidebar_width, export_provider_config_toml,
+    clamp_sidebar_width, clamp_ui_scale, effective_sidebar_width, export_provider_config_toml,
     import_provider_config_toml, resolve_color_scheme, validate_provider_config_export,
-    ClipboardWatchConfig, ColorScheme, GeneralConfig, LocalKnowledgeConfig, LoggingConfig,
-    NotificationsConfig, OllamaConfig, OpenAiConfig,
-    PersonaConfig, PersonaMode, ProviderConfigExport, RoninConfig, ThemePreference, UiConfig,
-    SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN,
+    ClipboardWatchConfig, ColorScheme, FeaturesConfig, GeneralConfig, LocalKnowledgeConfig,
+    LoggingConfig, NotificationsConfig, OllamaConfig, OpenAiConfig, PersonaConfig, PersonaMode,
+    ProviderConfigExport, RoninConfig, ThemePreference, UiConfig, SIDEBAR_WIDTH_DEFAULT,
+    SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN, UI_SCALE_DEFAULT, UI_SCALE_MAX, UI_SCALE_MIN,
 };
 pub use context::{
     artifact_attachment, attachment_content_chars, clipboard_attachment, context_path_base,

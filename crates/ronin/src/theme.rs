@@ -144,7 +144,7 @@ impl M0Theme {
         }
     }
 
-    /// The polished light theme (Catppuccin Latte–aligned, not a dark fallback).
+    /// The polished light theme (Catppuccin Latte-aligned, not a dark fallback).
     pub fn light() -> Self {
         Self {
             color_scheme: ColorScheme::Light,
@@ -163,4 +163,9 @@ impl M0Theme {
             accent_text: rgb(0xffffff).into(),
         }
     }
+}
+
+/// Sans-serif family used by chrome typography (title bar, labels, empty states).
+pub fn ui_font_family() -> &'static str {
+    "Inter"
 }

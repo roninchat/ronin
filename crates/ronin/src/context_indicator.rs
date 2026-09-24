@@ -255,3 +255,11 @@ pub fn project_context_indicator(input: ContextEstimateInput<'_>) -> ContextIndi
         omission_label,
     }
 }
+
+/// Whether the composer context indicator should paint.
+///
+/// Hidden in the comfortable band (`fill < 0.60`) when no history would be
+/// omitted, so an idle composer (~414 / 20k tokens) stays out of the way.
+pub fn context_indicator_visible(indicator: &ContextIndicator) -> bool {
+    indicator.level != ContextFillLevel::Comfortable || indicator.messages_omitted
+}

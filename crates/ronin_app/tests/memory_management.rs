@@ -33,6 +33,9 @@ fn open_shell() -> (TempDir, RoninShell) {
 fn enabled_profile_memory_should_be_injected_into_provider_context() {
     let (_temp, mut shell) = open_shell();
     shell
+        .set_features_memories(true)
+        .expect("enable memories feature");
+    shell
         .create_profile_memory("Name", "Ada Lovelace")
         .expect("create profile");
     shell
@@ -69,8 +72,38 @@ fn enabled_profile_memory_should_be_injected_into_provider_context() {
 }
 
 #[test]
+fn enabled_profile_memory_should_not_inject_when_features_memories_disabled() {
+    let (_temp, mut shell) = open_shell();
+    assert!(!shell.features_memories_enabled());
+    shell
+        .create_profile_memory("Name", "Ada Lovelace")
+        .expect("create profile");
+
+    let thread_id = shell.state().selected_thread_id.clone().expect("thread");
+    let provider = CapturingProvider {
+        captured_requests: RefCell::new(Vec::new()),
+    };
+    shell
+        .send_message_with_provider(&thread_id, "Hello", &provider, "test-model")
+        .expect("send");
+
+    let reqs = provider.captured_requests.borrow();
+    assert_eq!(reqs.len(), 1);
+    for msg in &reqs[0].messages {
+        assert!(
+            !msg.content.contains("Ada Lovelace") && !msg.content.contains("Profile memory"),
+            "profile memory leaked into request with memories feature off: {}",
+            msg.content
+        );
+    }
+}
+
+#[test]
 fn disabled_profile_memory_should_be_excluded_from_provider_context() {
     let (_temp, mut shell) = open_shell();
+    shell
+        .set_features_memories(true)
+        .expect("enable memories feature");
     let mem = shell
         .create_profile_memory("Secret", "should-not-appear")
         .expect("create profile");
@@ -112,4 +145,25 @@ fn memory_enable_and_profile_flags_should_persist_via_shell() {
     assert_eq!(listed.len(), 1);
     assert!(!listed[0].enabled);
     assert!(listed[0].is_profile);
+}
+
+#[test]
+fn shell_features_flags_should_default_off_and_persist() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = RoninPaths {
+        config_dir: temp.path().join("config"),
+        data_dir: temp.path().join("data"),
+    };
+    let mut shell = RoninShell::open(paths.clone()).expect("open shell");
+    assert!(!shell.features_memories_enabled());
+    assert!(!shell.features_artifacts_enabled());
+
+    shell.set_features_memories(true).expect("memories");
+    shell.set_features_artifacts(true).expect("artifacts");
+    assert!(shell.features_memories_enabled());
+    assert!(shell.features_artifacts_enabled());
+
+    let reopened = RoninShell::open(paths).expect("reopen");
+    assert!(reopened.features_memories_enabled());
+    assert!(reopened.features_artifacts_enabled());
 }

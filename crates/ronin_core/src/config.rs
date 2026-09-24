@@ -7,12 +7,29 @@ pub const SIDEBAR_WIDTH_MAX: f32 = 480.0;
 /// Default sidebar width in pixels.
 pub const SIDEBAR_WIDTH_DEFAULT: f32 = 280.0;
 
+/// Minimum UI scale factor.
+pub const UI_SCALE_MIN: f32 = 0.8;
+/// Maximum UI scale factor.
+pub const UI_SCALE_MAX: f32 = 1.6;
+/// Default UI scale factor.
+pub const UI_SCALE_DEFAULT: f32 = 1.0;
+
 /// Clamps a preferred sidebar width into the supported range.
 pub fn clamp_sidebar_width(width: f32) -> f32 {
     if !width.is_finite() {
         return SIDEBAR_WIDTH_DEFAULT;
     }
     width.clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX)
+}
+
+/// Clamps a preferred UI scale into the supported range.
+///
+/// Non-finite values (`NaN`, infinities) fall back to [`UI_SCALE_DEFAULT`].
+pub fn clamp_ui_scale(scale: f32) -> f32 {
+    if !scale.is_finite() {
+        return UI_SCALE_DEFAULT;
+    }
+    scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX)
 }
 
 /// Width used for layout: `0` when collapsed, otherwise the clamped preference.
@@ -116,28 +133,63 @@ impl Default for OllamaConfig {
     }
 }
 
-/// UI chrome preferences (sidebar layout, etc.).
+/// UI chrome preferences (sidebar layout, scale, shortcut coaching).
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct UiConfig {
     /// Preferred sidebar width in pixels (clamped when applied).
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
-    /// Whether the sidebar is fully collapsed.
-    #[serde(default)]
+    /// Whether the sidebar is collapsed to the icon rail (default **on**).
+    #[serde(default = "default_sidebar_collapsed")]
     pub sidebar_collapsed: bool,
+    /// UI scale factor (clamped when applied).
+    #[serde(default = "default_ui_scale")]
+    pub scale: f32,
+    /// When true, shortcut hint copy is shown in the chrome.
+    #[serde(default = "default_show_shortcut_hints")]
+    pub show_shortcut_hints: bool,
+    /// When true, the first-run shortcut coach has already been dismissed.
+    #[serde(default)]
+    pub shortcut_coach_seen: bool,
 }
 
 fn default_sidebar_width() -> f32 {
     SIDEBAR_WIDTH_DEFAULT
 }
 
+fn default_sidebar_collapsed() -> bool {
+    true
+}
+
+fn default_ui_scale() -> f32 {
+    UI_SCALE_DEFAULT
+}
+
+fn default_show_shortcut_hints() -> bool {
+    true
+}
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
             sidebar_width: SIDEBAR_WIDTH_DEFAULT,
-            sidebar_collapsed: false,
+            sidebar_collapsed: true,
+            scale: UI_SCALE_DEFAULT,
+            show_shortcut_hints: true,
+            shortcut_coach_seen: false,
         }
     }
+}
+
+/// Opt-in product feature flags (default **off**).
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct FeaturesConfig {
+    /// When true, enabled profile memories may be injected into provider context.
+    #[serde(default)]
+    pub memories: bool,
+    /// When true, artifacts workflows are available in the product chrome.
+    #[serde(default)]
+    pub artifacts: bool,
 }
 
 /// How custom persona text combines with the built-in Ronin system prompt.
@@ -254,7 +306,7 @@ pub struct RoninConfig {
     pub ollama: OllamaConfig,
     /// OpenAI provider configuration.
     pub openai: Option<OpenAiConfig>,
-    /// UI chrome preferences (sidebar width / collapse).
+    /// UI chrome preferences (sidebar, scale, shortcut coaching).
     #[serde(default)]
     pub ui: UiConfig,
     /// Persona / system-prompt customization.
@@ -272,6 +324,9 @@ pub struct RoninConfig {
     /// Folder listing / local-knowledge privacy controls.
     #[serde(default)]
     pub local_knowledge: LocalKnowledgeConfig,
+    /// Opt-in product features (memories, artifacts). Default off.
+    #[serde(default)]
+    pub features: FeaturesConfig,
 }
 
 /// Portable provider settings for import/export (never includes secrets).
@@ -324,8 +379,8 @@ pub fn validate_provider_config_export(bundle: &ProviderConfigExport) -> Result<
 
 /// Parses and validates a provider-config TOML string, merging into `current`.
 ///
-/// Theme, UI, and persona settings on `current` are preserved. Only provider
-/// settings (`general`, `ollama`, `openai`) are replaced from the import.
+/// Theme, UI, persona, and features settings on `current` are preserved. Only
+/// provider settings (`general`, `ollama`, `openai`) are replaced from the import.
 pub fn import_provider_config_toml(
     current: &RoninConfig,
     toml_text: &str,

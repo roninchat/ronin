@@ -20,7 +20,7 @@ fn memory_crud_round_trip() {
     assert_eq!(memory.content, "User prefers Rust for backend");
     assert!(memory.created_at > 0);
     assert_eq!(memory.updated_at, memory.created_at);
-    assert!(memory.enabled);
+    assert!(!memory.enabled);
     assert!(!memory.is_profile);
 
     // 2. Get by ID
@@ -55,7 +55,7 @@ fn memory_enabled_and_profile_should_persist() {
     let memory = db
         .create_memory("Prefs", "likes tea")
         .expect("create memory");
-    assert!(memory.enabled);
+    assert!(!memory.enabled);
     assert!(!memory.is_profile);
 
     db.set_memory_enabled(&memory.id, false)
@@ -87,4 +87,14 @@ fn create_profile_memory_should_be_enabled_profile() {
         .expect("create profile");
     assert!(memory.enabled);
     assert!(memory.is_profile);
+}
+
+#[test]
+fn create_memory_should_start_disabled() {
+    let (db, _temp) = open_test_db();
+    let memory = db
+        .create_memory("Prefs", "likes tea")
+        .expect("create memory");
+    assert!(!memory.enabled);
+    assert!(!memory.is_profile);
 }
