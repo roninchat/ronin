@@ -459,11 +459,12 @@ impl Render for QuickModeWindow {
                             .min_h(px(72.0))
                             .track_focus(&self.composer_focus)
                             .on_key_down(cx.listener(Self::on_key_down))
-                            .child(self.composer.render_text(
+                            .child(self.composer.render_text_with_selection(
                                 question_placeholder(),
                                 theme.text_primary,
                                 theme.text_muted,
                                 theme.accent,
+                                theme.surface_selected,
                             )),
                     )
                     .child(

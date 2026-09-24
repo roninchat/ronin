@@ -1,8 +1,8 @@
 //! Titlebar, icon rail, overflow menus, palettes, settings, and the first-run coach.
 
 use gpui::{
-    div, prelude::*, px, App, Context, Decorations, FontWeight, KeyDownEvent, MouseButton,
-    MouseDownEvent, SharedString, Window, WindowControlArea,
+    deferred, div, prelude::*, px, App, Context, Decorations, FontWeight, KeyDownEvent,
+    MouseButton, MouseDownEvent, SharedString, Window, WindowControlArea,
 };
 use ronin::chrome::{
     message_overflow_items_with_flags, thread_overflow_items, window_overflow_items, OverflowItem,
@@ -25,6 +25,14 @@ use ronin_core::{clamp_ui_scale, ThemePreference, UI_SCALE_DEFAULT};
 
 use super::{ChromeMenu, RoninWindow};
 
+fn theme_preference_label(pref: ThemePreference) -> &'static str {
+    match pref {
+        ThemePreference::Light => "Light",
+        ThemePreference::Dark => "Dark",
+        ThemePreference::System => "System",
+    }
+}
+
 pub(crate) fn icon_hit(
     id: impl Into<SharedString>,
     name: IconName,
@@ -41,6 +49,7 @@ pub(crate) fn icon_hit(
         .rounded_md()
         .cursor_pointer()
         .hover(move |style| style.bg(hover_bg))
+        .active(move |style| style.bg(hover_bg))
         .on_mouse_down(MouseButton::Left, listener)
         .child(icon(name, color, 16.0))
 }
@@ -124,6 +133,22 @@ impl RoninWindow {
 
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings.close();
+        cx.notify();
+    }
+
+    /// Moves the settings section without closing the overlay.
+    pub(crate) fn cycle_settings_section(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let sections = visible_sections(self.settings.search());
+        if sections.is_empty() {
+            return;
+        }
+        let current = sections
+            .iter()
+            .position(|section| *section == self.settings.section())
+            .unwrap_or(0);
+        let len = sections.len() as i32;
+        let next = (current as i32 + delta).rem_euclid(len) as usize;
+        self.settings.set_section(sections[next]);
         cx.notify();
     }
 
@@ -538,7 +563,11 @@ impl RoninWindow {
             .window_control_area(WindowControlArea::Drag)
             .child(icon_hit(
                 "titlebar-hamburger",
-                IconName::Menu,
+                if self.sidebar_collapsed {
+                    IconName::PanelLeft
+                } else {
+                    IconName::PanelLeftClose
+                },
                 theme.text_primary,
                 theme.surface_hover,
                 cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
@@ -573,7 +602,12 @@ impl RoninWindow {
                             cx.notify();
                         }),
                     )
-                    .child(model_label),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .child(model_label)
+                    .child(icon(IconName::ChevronsUpDown, theme.text_muted, 12.0)),
             )
             .child(
                 div()
@@ -642,7 +676,7 @@ impl RoninWindow {
                 }),
             ));
         }
-        menu
+        deferred(menu).with_priority(1)
     }
 
     pub(crate) fn render_thread_overflow(
@@ -661,7 +695,7 @@ impl RoninWindow {
                 }),
             ));
         }
-        menu
+        deferred(menu).with_priority(1)
     }
 
     pub(crate) fn render_message_overflow(
@@ -694,7 +728,7 @@ impl RoninWindow {
                 }),
             ));
         }
-        menu
+        deferred(menu).with_priority(1)
     }
 
     fn menu_surface(&self, theme: &M0Theme) -> gpui::Div {
@@ -877,7 +911,7 @@ impl RoninWindow {
                     ),
             );
         }
-        menu
+        deferred(menu).with_priority(1)
     }
 
     pub(crate) fn render_command_palette(
@@ -930,6 +964,7 @@ impl RoninWindow {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
                             this.command_palette.close();
                             this.apply_palette_action(action_item.clone(), window, cx);
                         }),
@@ -967,6 +1002,7 @@ impl RoninWindow {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
             )
+            .child(ronin::companion::grain_overlay(theme.text_muted))
             .child(
                 div()
                     .w(px(480.0))
@@ -985,7 +1021,7 @@ impl RoninWindow {
                         )
                         .box_shadows(),
                     )
-                    .on_mouse_down(MouseButton::Left, |_, _, _| {})
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(div().text_xs().text_color(theme.text_muted).child(heading))
                     .child(
                         div()
@@ -996,11 +1032,12 @@ impl RoninWindow {
                             .py_1()
                             .track_focus(&self.palette_focus)
                             .on_key_down(cx.listener(Self::on_palette_key_down))
-                            .child(self.palette_editor.render_text(
+                            .child(self.palette_editor.render_text_with_selection(
                                 "Type to filter…",
                                 theme.text_primary,
                                 theme.text_muted,
                                 theme.accent,
+                                theme.surface_selected,
                             )),
                     )
                     .child(list),
@@ -1028,15 +1065,31 @@ impl RoninWindow {
                     } else {
                         theme.sidebar_background
                     })
+                    .border_1()
+                    .border_color(if selected {
+                        theme.accent
+                    } else {
+                        theme.sidebar_background
+                    })
                     .text_sm()
                     .text_color(theme.text_primary)
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.surface_hover))
+                    .occlude()
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, _, cx| {
                             this.settings.set_section(section);
                             cx.notify();
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.settings.set_section(section);
+                            cx.notify();
+                            cx.stop_propagation();
                         }),
                     )
                     .child(section_label(section)),
@@ -1055,6 +1108,7 @@ impl RoninWindow {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| this.close_settings(cx)),
             )
+            .child(ronin::companion::grain_overlay(theme.text_muted))
             .child(
                 div()
                     .w(px(720.0))
@@ -1073,7 +1127,8 @@ impl RoninWindow {
                         )
                         .box_shadows(),
                     )
-                    .on_mouse_down(MouseButton::Left, |_, _, _| {})
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         div()
                             .w(px(180.0))
@@ -1196,7 +1251,34 @@ impl RoninWindow {
                                     MouseButton::Left,
                                     cx.listener(|this, _, _, cx| this.cycle_theme(cx)),
                                 )
-                                .child(format!("{:?}", self.theme_preference)),
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1()
+                                        .when(
+                                            self.theme_preference == ThemePreference::Light,
+                                            |row| {
+                                                row.child(icon(
+                                                    IconName::Sun,
+                                                    theme.text_primary,
+                                                    14.0,
+                                                ))
+                                            },
+                                        )
+                                        .when(
+                                            self.theme_preference == ThemePreference::Dark,
+                                            |row| {
+                                                row.child(icon(
+                                                    IconName::Moon,
+                                                    theme.text_primary,
+                                                    14.0,
+                                                ))
+                                            },
+                                        )
+                                        .child(theme_preference_label(self.theme_preference)),
+                                ),
                         ),
                 )
                 .child(
@@ -1219,7 +1301,7 @@ impl RoninWindow {
                                         .py_1()
                                         .bg(theme.surface_muted)
                                         .cursor_pointer()
-                                        .child("−")
+                                        .child(icon(IconName::ZoomOut, theme.text_primary, 14.0))
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener(|this, _, _, cx| {
@@ -1241,7 +1323,7 @@ impl RoninWindow {
                                         .py_1()
                                         .bg(theme.surface_muted)
                                         .cursor_pointer()
-                                        .child("+")
+                                        .child(icon(IconName::ZoomIn, theme.text_primary, 14.0))
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener(|this, _, _, cx| {

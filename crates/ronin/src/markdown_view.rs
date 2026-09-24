@@ -6,7 +6,7 @@
 //! than the window.
 
 use gpui::prelude::*;
-use gpui::{div, font, px, rgb, Div, FontStyle, FontWeight, StyledText, TextRun, UnderlineStyle};
+use gpui::{div, font, px, rgb, Div, FontWeight, StyledText, TextRun, UnderlineStyle};
 
 use crate::markdown::{Inline, ListItem, MarkdownBlock};
 use crate::syntax_highlight::{highlight_code, HighlightedLine};
@@ -226,16 +226,15 @@ impl RunBuilder<'_> {
 }
 
 fn font_for(flags: SpanFlags, base_weight: FontWeight) -> gpui::Font {
-    let family = if flags.code { "Courier New" } else { "Inter" };
-    let mut face = font(family);
-    face.weight = if flags.strong {
-        FontWeight(700.)
+    // Only Inter Regular (400) and Inter SemiBold (600) are bundled. Code,
+    // strong, and emphasis use SemiBold so they stay distinct without a
+    // missing italic or monospace face.
+    let mut face = font("Inter");
+    face.weight = if flags.code || flags.strong || flags.emphasis {
+        FontWeight(600.)
     } else {
         base_weight
     };
-    if flags.emphasis {
-        face.style = FontStyle::Italic;
-    }
     face
 }
 
@@ -287,7 +286,7 @@ fn append_word(output: &mut String, word: &str) {
 /// Renders fenced code body lines with theme-aware syntax highlighting.
 ///
 /// Uses [`highlight_code`] so streaming re-renders stay safe: unknown languages
-/// and missing language tags fall back to plain monospaced text.
+/// and missing language tags fall back to plain Inter text.
 pub fn render_highlighted_code_lines(
     language: Option<&str>,
     content: &str,
@@ -298,7 +297,7 @@ pub fn render_highlighted_code_lines(
 }
 
 fn render_highlighted_lines(lines: &[HighlightedLine]) -> Div {
-    let mut code_lines = div().w_full().font_family("Courier New").flex().flex_col();
+    let mut code_lines = div().w_full().font_family("Inter").flex().flex_col();
     for line in lines {
         let mut row = div().flex().flex_row().flex_wrap();
         if line.spans.is_empty() || (line.spans.len() == 1 && line.spans[0].text.is_empty()) {
@@ -364,10 +363,23 @@ mod tests {
         assert_eq!(text, "Hello world x y z");
         assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
         assert!(runs.iter().any(|run| run.underline.is_some()));
-        assert!(runs.iter().any(|run| run.font.style == FontStyle::Italic));
-        assert!(runs
-            .iter()
-            .any(|run| run.font.family.as_ref() == "Courier New"));
+        assert!(runs.iter().any(|run| run.font.weight == FontWeight(600.)));
+        assert!(runs.iter().all(|run| run.font.family.as_ref() == "Inter"));
+        let mut offset = 0usize;
+        let mut code_is_semibold = false;
+        let mut emphasis_is_semibold = false;
+        for run in &runs {
+            let slice = &text[offset..offset + run.len];
+            if slice == "x" {
+                code_is_semibold = run.font.weight == FontWeight(600.);
+            }
+            if slice == "y" {
+                emphasis_is_semibold = run.font.weight == FontWeight(600.);
+            }
+            offset += run.len;
+        }
+        assert!(code_is_semibold);
+        assert!(emphasis_is_semibold);
     }
 
     #[test]

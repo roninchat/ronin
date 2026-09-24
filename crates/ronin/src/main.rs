@@ -1,10 +1,11 @@
 use std::process::ExitCode;
 
 use gpui::{
-    div, hsla, img, point, prelude::*, px, size, App, Application, Bounds, ClipboardEntry, Context,
-    DragMoveEvent, ExternalPaths, FocusHandle, FontWeight, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollHandle, SharedString, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowHandle, WindowOptions,
+    canvas, deferred, div, ease_out_quint, hsla, img, point, prelude::*, px, size, Animation,
+    AnimationExt, App, Application, Bounds, ClipboardEntry, Context, DragMoveEvent, ExternalPaths,
+    FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window,
+    WindowBounds, WindowDecorations, WindowHandle, WindowOptions,
 };
 use ronin::{
     acquire_instance,
@@ -19,6 +20,7 @@ use ronin::{
     chrome::{ICON_RAIL_WIDTH, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH},
     clipboard_watch::ArboardClipboardSource,
     command_palette::CommandPaletteState,
+    companion::{grain_overlay, reaction_hold, render_companion, CompanionMood},
     completions,
     composer::ComposerEditor,
     composer_ingest::{
@@ -71,8 +73,8 @@ use ronin::{
     },
     visual_polish::{
         cursor_visible_at, elevation_style, empty_state, error_presentation, generating_label,
-        streaming_motion, Elevation, EmptyStateContent, EmptyStateKind, ErrorKind,
-        ErrorPresentation,
+        send_pulse_ms, sidebar_slide_ms, streaming_motion, Elevation, EmptyStateContent,
+        EmptyStateKind, ErrorKind, ErrorPresentation,
     },
     InstancePrimary, LaunchIntent, LauncherError,
 };
@@ -299,6 +301,11 @@ pub(crate) fn open_main_window(
                     notifications_enabled,
                     auto_title,
                     _appearance_subscription,
+                    companion_mood: CompanionMood::Idle,
+                    companion_mood_at: std::time::Instant::now(),
+                    send_pulse_at: None,
+                    sidebar_motion_gen: 0,
+                    composer_input_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
                 }
             })
         },
@@ -389,6 +396,13 @@ struct RoninWindow {
     notifications_enabled: bool,
     auto_title: bool,
     _appearance_subscription: Subscription,
+    companion_mood: CompanionMood,
+    companion_mood_at: std::time::Instant,
+    send_pulse_at: Option<std::time::Instant>,
+    /// Increments on each sidebar toggle so the width animation restarts.
+    sidebar_motion_gen: u32,
+    /// Last laid-out bounds of the composer text box, in window coordinates.
+    composer_input_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -496,6 +510,7 @@ impl RoninWindow {
             .items_center()
             .justify_center()
             .bg(overlay_bg)
+            .occlude()
             .border_2()
             .border_color(theme.accent)
             .can_drop(|value, _, _| value.is::<ExternalPaths>())
@@ -1171,6 +1186,7 @@ impl RoninWindow {
                     self.preattached_files.clear();
                     self.pending_attachments.clear();
                     self.clear_pending_folder_attaches();
+                    self.note_outgoing();
                 }
                 cx.notify();
                 return;
@@ -1195,6 +1211,7 @@ impl RoninWindow {
                         self.preattached_files.clear();
                         self.pending_attachments.clear();
                         self.clear_pending_folder_attaches();
+                        self.note_outgoing();
                         cx.notify();
                     }
                     Err(err) => {
@@ -1215,6 +1232,7 @@ impl RoninWindow {
                     self.preattached_files.clear();
                     self.pending_attachments.clear();
                     self.clear_pending_folder_attaches();
+                    self.note_outgoing();
                 }
                 cx.notify();
             }
@@ -1698,7 +1716,7 @@ impl RoninWindow {
 
     fn on_composer_mouse_down(
         &mut self,
-        _event: &MouseDownEvent,
+        event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1707,23 +1725,24 @@ impl RoninWindow {
         self.keyboard_nav
             .set_focus(FocusRegion::Composer, self.thread_count());
         window.focus(&self.composer_focus);
-        // NOTE: MouseDownEvent.position is window-relative in GPUI 0.2,
-        // not element-relative. For now, clicking anywhere in composer
-        // moves cursor to end. Full pixel positioning needs element bounds.
-        self.composer.click_at_end();
+        if let Some((x, y)) = self.composer_local_point(event.position) {
+            self.composer.click_at(x, y);
+        } else {
+            self.composer.click_at_end();
+        }
         cx.notify();
     }
 
     fn on_composer_mouse_move(
         &mut self,
-        _event: &MouseMoveEvent,
+        event: &MouseMoveEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Mouse drag extends selection from anchor to end of text
-        // (pixel-perfect drag needs element-relative coords, not available in GPUI 0.2)
-        if self.composer.drag_to_end() {
-            cx.notify();
+        if let Some((x, y)) = self.composer_local_point(event.position) {
+            if self.composer.drag_to(x, y) {
+                cx.notify();
+            }
         }
     }
 
@@ -2031,6 +2050,7 @@ impl RoninWindow {
     fn create_new_thread(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         match self.shell.create_new_thread() {
             Ok(_) => {
+                self.note_new_chat();
                 self.keyboard_nav
                     .set_focus(FocusRegion::Composer, self.thread_count());
                 window.focus(&self.composer_focus);
@@ -2356,9 +2376,22 @@ impl RoninWindow {
             self.on_palette_key_down(event, window, cx);
             return;
         }
-        if self.settings.is_open() && keystroke.key.as_str() == "escape" {
-            self.close_settings(cx);
-            return;
+        if self.settings.is_open() {
+            match keystroke.key.as_str() {
+                "escape" => {
+                    self.close_settings(cx);
+                    return;
+                }
+                "down" | "right" => {
+                    self.cycle_settings_section(1, cx);
+                    return;
+                }
+                "up" | "left" => {
+                    self.cycle_settings_section(-1, cx);
+                    return;
+                }
+                _ => {}
+            }
         }
         if keystroke.key.as_str() == "escape" && self.chrome_menu.is_some() {
             self.chrome_menu = None;
@@ -2543,11 +2576,7 @@ impl RoninWindow {
         match region {
             FocusRegion::Sidebar => {
                 if self.sidebar_collapsed {
-                    if let Err(e) = self.shell.set_sidebar_collapsed(false) {
-                        tracing::error!(%e, "failed to expand sidebar for focus");
-                    } else {
-                        self.sidebar_collapsed = false;
-                    }
+                    self.set_sidebar_collapsed_to(false, cx);
                 }
                 window.focus(&self.sidebar_focus);
             }
@@ -2578,14 +2607,41 @@ impl RoninWindow {
         self.shell.state().threads.len()
     }
 
-    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        match self.shell.toggle_sidebar_collapsed() {
-            Ok(collapsed) => {
+    /// One sidebar open/closed write used by the shortcut, the titlebar, and the sidebar button.
+    fn set_sidebar_collapsed_to(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        if self.sidebar_collapsed == collapsed {
+            return;
+        }
+        match self.shell.set_sidebar_collapsed(collapsed) {
+            Ok(()) => {
                 self.sidebar_collapsed = collapsed;
+                self.sidebar_motion_gen = self.sidebar_motion_gen.saturating_add(1);
                 cx.notify();
             }
-            Err(e) => tracing::error!(%e, "failed to toggle sidebar"),
+            Err(e) => tracing::error!(%e, "failed to set sidebar collapsed"),
         }
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.set_sidebar_collapsed_to(!self.sidebar_collapsed, cx);
+    }
+
+    fn note_outgoing(&mut self) {
+        self.companion_mood = CompanionMood::Sent;
+        self.companion_mood_at = std::time::Instant::now();
+        self.send_pulse_at = Some(self.companion_mood_at);
+    }
+
+    fn note_new_chat(&mut self) {
+        self.companion_mood = CompanionMood::NewChat;
+        self.companion_mood_at = std::time::Instant::now();
+    }
+
+    fn composer_local_point(&self, position: gpui::Point<Pixels>) -> Option<(f32, f32)> {
+        let bounds = self.composer_input_bounds.get()?;
+        let x = f32::from(position.x) - f32::from(bounds.origin.x);
+        let y = f32::from(position.y) - f32::from(bounds.origin.y);
+        Some((x.max(0.0), y.max(0.0)))
     }
 
     fn on_sidebar_resize_move(
@@ -2624,6 +2680,7 @@ impl RoninWindow {
     fn create_new_thread_shortcut(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.shell.create_new_thread() {
             Ok(_) => {
+                self.note_new_chat();
                 self.keyboard_nav
                     .set_focus(FocusRegion::Composer, self.thread_count());
                 window.focus(&self.composer_focus);
@@ -2724,18 +2781,23 @@ impl RoninWindow {
     // ── rendering ──
 
     fn render_empty_state(&self, content: EmptyStateContent, theme: &M0Theme) -> impl IntoElement {
+        let center = matches!(content.title, "Start a conversation" | "No threads yet");
+        let glyph = match content.icon {
+            "◇" => IconName::Box,
+            "◎" => IconName::Sparkles,
+            "⌕" => IconName::Search,
+            "⚠" => IconName::HelpCircle,
+            "◻" => IconName::Box,
+            _ => IconName::MessageSquarePlus,
+        };
         let mut block = div()
             .p_4()
             .rounded_lg()
             .flex()
             .flex_col()
             .gap_2()
-            .child(
-                div()
-                    .text_lg()
-                    .text_color(theme.text_muted)
-                    .child(content.icon),
-            )
+            .when(center, |el| el.items_center())
+            .child(icon(glyph, theme.text_muted, 22.0))
             .child(
                 div()
                     .font_weight(FontWeight(600.))
@@ -2774,13 +2836,7 @@ impl RoninWindow {
                     .flex()
                     .flex_row()
                     .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight(700.))
-                            .text_color(theme.accent)
-                            .child(err.icon),
-                    )
+                    .child(icon(IconName::HelpCircle, theme.accent, 16.0))
                     .child(
                         div()
                             .text_sm()
@@ -2807,10 +2863,6 @@ impl RoninWindow {
         sidebar_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        if self.sidebar_collapsed {
-            return div().into_any_element();
-        }
-
         let selected_thread_id = self.shell.state().selected_thread_id.clone();
         let threads = self.shell.state().threads.clone();
         let truncation_notice = self.shell.state().truncation_notice;
@@ -2877,11 +2929,12 @@ impl RoninWindow {
                                     .py_1()
                                     .track_focus(&self.thread_rename_focus)
                                     .on_key_down(cx.listener(Self::on_thread_rename_key_down))
-                                    .child(editor.render_text(
+                                    .child(editor.render_text_with_selection(
                                         "Thread title",
                                         theme.text_primary,
                                         theme.text_muted,
                                         theme.accent,
+                                        theme.surface_selected,
                                     )),
                             )
                             .child(
@@ -3000,14 +3053,28 @@ impl RoninWindow {
             theme.border_subtle
         };
 
-        div()
+        let collapsed = self.sidebar_collapsed;
+        let width = self.sidebar_width;
+        let motion_gen = self.sidebar_motion_gen;
+        if collapsed && motion_gen == 0 {
+            return div()
+                .id("sidebar-collapsed")
+                .w(px(0.))
+                .min_w(px(0.))
+                .max_w(px(0.))
+                .h_full()
+                .overflow_hidden()
+                .into_any_element();
+        }
+        let sidebar = div()
             .relative()
-            .w(px(self.sidebar_width))
+            .min_w(px(0.))
+            .w(px(width))
             .h_full()
             .flex()
             .flex_col()
-            .gap_3()
-            .p_4()
+            .gap_2()
+            .p_3()
             .min_w_0()
             .overflow_hidden()
             .bg(theme.sidebar_background)
@@ -3024,12 +3091,27 @@ impl RoninWindow {
                     cx.notify();
                 }),
             )
+            .child(grain_overlay(theme.text_muted))
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(FontWeight(600.))
-                    .text_color(theme.text_muted)
-                    .child("Recents"),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight(600.))
+                            .text_color(theme.text_primary)
+                            .child("Recents"),
+                    )
+                    .child(shell_chrome::icon_hit(
+                        "sidebar-collapse",
+                        IconName::PanelLeftClose,
+                        theme.text_muted,
+                        theme.surface_hover,
+                        cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
+                    )),
             )
             .child(
                 div()
@@ -3039,13 +3121,6 @@ impl RoninWindow {
                     .min_w_0()
                     .id("sidebar-scroll")
                     .overflow_y_scroll()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.text_muted)
-                            .mb_2()
-                            .child("Threads"),
-                    )
                     .child(
                         if let Some(hint) = title_generation_status_label(title_generating) {
                             div().text_xs().text_color(theme.accent).mb_2().child(hint)
@@ -3065,8 +3140,27 @@ impl RoninWindow {
                     }),
             )
             .child(self.compact_provider_footer(theme, cx))
-            .child(resize_handle)
-            .into_any_element()
+            .child(resize_handle);
+        if motion_gen == 0 {
+            sidebar.into_any_element()
+        } else {
+            let target_collapsed = collapsed;
+            sidebar
+                .with_animation(
+                    SharedString::from(format!("sidebar-{motion_gen}")),
+                    Animation::new(std::time::Duration::from_millis(sidebar_slide_ms()))
+                        .with_easing(ease_out_quint()),
+                    move |el, delta| {
+                        let w = if target_collapsed {
+                            width * (1.0 - delta)
+                        } else {
+                            width * delta
+                        };
+                        el.w(px(w.max(0.0))).overflow_hidden()
+                    },
+                )
+                .into_any_element()
+        }
     }
 
     fn render_provider_status(
@@ -3181,14 +3275,25 @@ impl RoninWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let messages_opt = self.shell.state().messages.clone();
-        let messages = match messages_opt {
-            Some(msgs) if !msgs.is_empty() => msgs.clone(),
-            _ => {
-                return div().flex_1().p_6().id("empty-messages").child(
-                    self.render_empty_state(empty_state(EmptyStateKind::EmptyThread), theme),
-                );
-            }
-        };
+        let messages =
+            match messages_opt {
+                Some(msgs) if !msgs.is_empty() => msgs.clone(),
+                _ => {
+                    return div().flex_1().p_6().id("empty-messages").child(
+                        div()
+                            .child(self.render_empty_state(
+                                empty_state(EmptyStateKind::EmptyThread),
+                                theme,
+                            ))
+                            .with_animation(
+                                "empty-thread-in",
+                                Animation::new(std::time::Duration::from_millis(280))
+                                    .with_easing(ease_out_quint()),
+                                |el, delta| el.opacity(0.35 + 0.65 * delta),
+                            ),
+                    );
+                }
+            };
 
         let is_generating = self.shell.is_generation_active();
         let last_assistant_id = messages
@@ -3531,11 +3636,12 @@ impl RoninWindow {
                                             }
                                         },
                                     ))
-                                    .child(editor.render_text(
+                                    .child(editor.render_text_with_selection(
                                         "Edit message",
                                         theme.text_primary,
                                         theme.text_muted,
                                         theme.accent,
+                                        theme.surface_selected,
                                     )),
                             );
                             message_actions = message_actions
@@ -3595,7 +3701,15 @@ impl RoninWindow {
                                             theme.text_muted
                                         })
                                         .cursor_pointer()
-                                        .child("‹")
+                                        .child(icon(
+                                            IconName::ChevronLeft,
+                                            if prev_id.is_some() {
+                                                theme.accent
+                                            } else {
+                                                theme.text_muted
+                                            },
+                                            14.0,
+                                        ))
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener({
@@ -3617,7 +3731,15 @@ impl RoninWindow {
                                             theme.text_muted
                                         })
                                         .cursor_pointer()
-                                        .child("›")
+                                        .child(icon(
+                                            IconName::ChevronRight,
+                                            if next_id.is_some() {
+                                                theme.accent
+                                            } else {
+                                                theme.text_muted
+                                            },
+                                            14.0,
+                                        ))
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener({
@@ -3775,7 +3897,9 @@ impl RoninWindow {
 
         let mut composer = div()
             .id("composer")
-            .p_6()
+            .px_4()
+            .pb_4()
+            .pt_2()
             .flex()
             .flex_col()
             .gap_2()
@@ -4007,10 +4131,8 @@ impl RoninWindow {
                 if index < pending_len + preattached_len {
                     card = card.child(
                         div()
-                            .text_xs()
-                            .text_color(theme.accent)
                             .cursor_pointer()
-                            .child("×")
+                            .child(icon(IconName::X, theme.accent, 12.0))
                             .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, cx| {
@@ -4308,6 +4430,7 @@ impl RoninWindow {
                             .px_2()
                             .py_1()
                             .id("composer-input")
+                            .relative()
                             .overflow_y_scroll()
                             .track_scroll(&self.composer_scroll_handle)
                             .max_h(px(max_input_h))
@@ -4320,15 +4443,30 @@ impl RoninWindow {
                             )
                             .on_mouse_move(cx.listener(Self::on_composer_mouse_move))
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_composer_mouse_up))
-                            .child(self.composer.render_text(
+                            .child({
+                                let bounds = self.composer_input_bounds.clone();
+                                canvas(
+                                    move |bounds_now, _window, _cx| {
+                                        bounds.set(Some(bounds_now));
+                                    },
+                                    |_bounds, _state, _window, _cx| {},
+                                )
+                                .absolute()
+                                .inset_0()
+                            })
+                            .child(self.composer.render_text_with_selection(
                                 "Ask Ronin anything…",
                                 theme.text_primary,
                                 theme.text_muted,
                                 theme.accent,
+                                theme.surface_selected,
                             )),
                     )
-                    .child(
-                        div()
+                    .child({
+                        let pulse = self.send_pulse_at.is_some_and(|at| {
+                            at.elapsed().as_millis() < u128::from(send_pulse_ms())
+                        });
+                        let send = div()
                             .id("composer-send")
                             .size(px(32.0))
                             .flex()
@@ -4337,22 +4475,37 @@ impl RoninWindow {
                             .rounded_md()
                             .bg(send_btn_bg)
                             .flex_shrink_0()
-                            .hover(|style| {
-                                if !is_generating {
-                                    style.bg(theme.accent_hover).cursor_pointer()
-                                } else {
-                                    style
-                                }
-                            })
+                            .hover(|style| style.bg(theme.accent_hover).cursor_pointer())
                             .on_mouse_up(MouseButton::Left, {
                                 cx.listener(move |this, _event, _window, cx| {
-                                    if !this.shell.is_generation_active() {
+                                    if this.shell.is_generation_active() {
+                                        this.cancel_generation(cx);
+                                    } else {
                                         this.send_current_message(cx);
                                     }
                                 })
                             })
-                            .child(icon(IconName::Send, theme.accent_text, 16.0)),
-                    ),
+                            .child(icon(
+                                if is_generating {
+                                    IconName::Square
+                                } else {
+                                    IconName::Send
+                                },
+                                theme.accent_text,
+                                16.0,
+                            ));
+                        if pulse {
+                            send.with_animation(
+                                "send-ack",
+                                Animation::new(std::time::Duration::from_millis(send_pulse_ms()))
+                                    .with_easing(ease_out_quint()),
+                                |el, delta| el.opacity(0.55 + 0.45 * delta),
+                            )
+                            .into_any_element()
+                        } else {
+                            send.into_any_element()
+                        }
+                    }),
             ),
         )
     }
@@ -4841,11 +4994,12 @@ impl RoninWindow {
                                         }
                                     }
                                 }))
-                                .child(title_ed.render_text(
+                                .child(title_ed.render_text_with_selection(
                                     "Title",
                                     theme.text_primary,
                                     theme.text_muted,
                                     theme.accent,
+                                    theme.surface_selected,
                                 )),
                         )
                         .child(
@@ -4865,11 +5019,12 @@ impl RoninWindow {
                                         }
                                     }
                                 }))
-                                .child(content_ed.render_text(
+                                .child(content_ed.render_text_with_selection(
                                     "Content",
                                     theme.text_primary,
                                     theme.text_muted,
                                     theme.accent,
+                                    theme.surface_selected,
                                 )),
                         )
                         .child(
@@ -5433,6 +5588,7 @@ impl RoninWindow {
                 theme.app_background.l,
                 0.72,
             ))
+            .occlude()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -5440,6 +5596,7 @@ impl RoninWindow {
                     cx.notify();
                 }),
             )
+            .child(grain_overlay(theme.text_muted))
             .child(
                 div()
                     .w(px(560.0))
@@ -5453,7 +5610,7 @@ impl RoninWindow {
                     .flex_col()
                     .gap_3()
                     .shadow(elevation_style(Elevation::High, theme.color_scheme).box_shadows())
-                    .on_mouse_down(MouseButton::Left, |_, _, _| {})
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         div()
                             .flex()
@@ -5493,11 +5650,12 @@ impl RoninWindow {
                             .py_2()
                             .track_focus(&self.search_focus)
                             .on_key_down(cx.listener(Self::on_search_key_down))
-                            .child(self.search_query_editor.render_text(
+                            .child(self.search_query_editor.render_text_with_selection(
                                 "Search threads, artifacts, memories…",
                                 theme.text_primary,
                                 theme.text_muted,
                                 theme.accent,
+                                theme.surface_selected,
                             )),
                     )
                     .child(filter_row)
@@ -5598,6 +5756,7 @@ impl RoninWindow {
             .items_center()
             .justify_center()
             .bg(hsla(0., 0., 0., 0.45))
+            .occlude()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -5605,6 +5764,7 @@ impl RoninWindow {
                     cx.notify();
                 }),
             )
+            .child(grain_overlay(theme.text_muted))
             .child(
                 div()
                     .w(px(420.))
@@ -5617,7 +5777,7 @@ impl RoninWindow {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .on_mouse_down(MouseButton::Left, |_, _, _| {})
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
                         div()
                             .flex()
@@ -5676,6 +5836,8 @@ impl RoninWindow {
             .items_center()
             .justify_center()
             .bg(theme.app_background)
+            .occlude()
+            .child(grain_overlay(theme.text_muted))
             .child(
                 div()
                     .id("shortcut-help-scroll")
@@ -5824,17 +5986,29 @@ impl Render for RoninWindow {
             .map(|t| t.to_string())
             .unwrap_or_else(|| "New Chat".to_string());
         window.set_window_title(&titlebar_title);
+        if self.companion_mood != CompanionMood::Idle
+            && self.companion_mood_at.elapsed() > reaction_hold()
+        {
+            self.companion_mood = CompanionMood::Idle;
+            self.companion_mood_at = std::time::Instant::now();
+        }
+        if self
+            .send_pulse_at
+            .is_some_and(|at| at.elapsed().as_millis() >= u128::from(send_pulse_ms()))
+        {
+            self.send_pulse_at = None;
+        }
+        let companion_elapsed = self.companion_mood_at.elapsed().as_millis() as u64;
+        let companion_mood = self.companion_mood;
+
         let titlebar = self.render_titlebar(&theme, &titlebar_title, window, cx);
         let icon_rail = self.render_icon_rail(&theme, sidebar_focused, cx);
-        let recents = if self.sidebar_collapsed {
-            None
-        } else {
-            Some(self.render_sidebar(&theme, sidebar_focused, cx))
-        };
+        let recents = self.render_sidebar(&theme, sidebar_focused, cx);
         let messages = self.render_messages(&theme, messages_focused, cx);
         let composer = self.render_composer(&theme, composer_focused, cx);
 
         let main_col = div()
+            .relative()
             .flex_1()
             .min_w_0()
             .h_full()
@@ -5843,19 +6017,28 @@ impl Render for RoninWindow {
             .can_drop(|value, _, _| value.is::<ExternalPaths>())
             .on_drop(cx.listener(Self::on_external_paths_drop))
             .child(messages)
-            .child(composer);
+            .child(composer)
+            .child(
+                div()
+                    .absolute()
+                    .top(px(12.))
+                    .right(px(16.))
+                    .child(render_companion(
+                        companion_mood,
+                        companion_elapsed,
+                        theme.text_muted,
+                    )),
+            );
 
-        let mut body = div()
+        let body = div()
             .flex_1()
             .min_h_0()
             .w_full()
             .flex()
             .flex_row()
-            .child(icon_rail);
-        if let Some(recents) = recents {
-            body = body.child(recents);
-        }
-        body = body.child(main_col);
+            .child(icon_rail)
+            .child(recents)
+            .child(main_col);
 
         let mut ui = div()
             .id("ronin-root")
@@ -5872,6 +6055,7 @@ impl Render for RoninWindow {
             .can_drop(|value, _, _| value.is::<ExternalPaths>())
             .on_drag_move(cx.listener(Self::on_external_paths_drag_move))
             .on_drop(cx.listener(Self::on_external_paths_drop))
+            .child(grain_overlay(theme.text_muted))
             .child(titlebar)
             .child(body);
 
@@ -5883,39 +6067,49 @@ impl Render for RoninWindow {
             ui = ui.child(self.render_artifacts_panel(&theme, cx));
         }
 
+        let modal_open = self.settings.is_open()
+            || self.command_palette.is_open()
+            || self.search_panel.is_open()
+            || self.model_picker.is_open()
+            || self.keyboard_nav.help_visible();
+        if !modal_open {
+            if let Some(coach) = self.render_shortcut_coach(&theme, cx) {
+                ui = ui.child(deferred(coach).with_priority(2));
+            }
+        }
+
         if self.keyboard_nav.help_visible() {
-            ui = ui.child(self.render_shortcut_help(&theme, cx));
+            ui = ui.child(deferred(self.render_shortcut_help(&theme, cx)).with_priority(3));
         }
 
         if self.search_panel.is_open() {
-            ui = ui.child(self.render_search_panel(&theme, cx));
+            ui = ui.child(deferred(self.render_search_panel(&theme, cx)).with_priority(3));
         }
 
         if self.model_picker.is_open() {
             self.rebuild_model_picker_entries();
-            ui = ui.child(self.render_model_picker(&theme, cx));
+            ui = ui.child(deferred(self.render_model_picker(&theme, cx)).with_priority(3));
         }
 
         if self.command_palette.is_open() {
-            ui = ui.child(self.render_command_palette(&theme, cx));
+            ui = ui.child(deferred(self.render_command_palette(&theme, cx)).with_priority(3));
         }
 
         if self.settings.is_open() {
-            ui = ui.child(self.render_settings_overlay(&theme, cx));
-        }
-
-        if let Some(coach) = self.render_shortcut_coach(&theme, cx) {
-            ui = ui.child(coach);
+            ui = ui.child(deferred(self.render_settings_overlay(&theme, cx)).with_priority(3));
         }
 
         if drop_overlay_should_show(self.file_drop_active) {
-            ui = ui.child(self.render_drop_overlay(&theme, cx));
+            ui = ui.child(deferred(self.render_drop_overlay(&theme, cx)).with_priority(4));
         }
 
         let mut needs_frame = streaming_active
             || composer_focused
             || self.sidebar_drag.is_some()
-            || self.file_drop_active;
+            || self.file_drop_active
+            || self.shell.is_generation_active()
+            || self.companion_mood != CompanionMood::Idle
+            || self.send_pulse_at.is_some();
         if let Some((_, time)) = self.copied_state.as_ref() {
             if time.elapsed().as_secs_f32() >= 1.0 {
                 self.copied_state = None;

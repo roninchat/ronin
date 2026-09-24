@@ -40,11 +40,15 @@ impl ComposerEditor {
         }
     }
 
-    /// Update font metrics from rem size.
+    /// Updates hit-testing metrics from the composer rem size.
+    ///
+    /// Inter is proportional, so these are approximations used for hit testing,
+    /// not measured glyph advances. The shell root rem is 16px and the composer
+    /// rem is 14px. `char_width` tracks Inter's average advance; `line_height`
+    /// matches the line box the caret and click targets use.
     pub fn set_font_metrics_from_rem(&mut self, rem_px: f32) {
-        // Monospace approx: char width ≈ 0.6 * rem, line height ≈ 1.5 * rem
-        self.char_width = rem_px * 0.6;
-        self.line_height = rem_px * 1.5;
+        self.char_width = rem_px * 0.52;
+        self.line_height = rem_px * 1.45;
     }
 
     /// Set container pixel width for layout computations.
@@ -476,11 +480,37 @@ impl ComposerEditor {
         (s + col_bytes).min(e)
     }
 
-    /// Handles mouse click when pixel positioning is unavailable.
-    /// Moves cursor to end of text.
-    pub fn click_at_end(&mut self) {
+    /// Places the caret at `x`, `y`, clears the selection, and starts a drag.
+    pub fn click_at(&mut self, x: f32, y: f32) {
+        self.cursor = self.cursor_from_point(x, y);
+        self.clear_selection();
         self.drag_anchor = self.cursor;
         self.dragging = true;
+    }
+
+    /// Extends the drag selection to `x`, `y`.
+    ///
+    /// Returns whether the cursor or selection changed. A no-op when no drag is active.
+    pub fn drag_to(&mut self, x: f32, y: f32) -> bool {
+        if !self.dragging {
+            return false;
+        }
+        let next = self.cursor_from_point(x, y);
+        let prev_cursor = self.cursor;
+        let prev_selection = self.selection;
+        self.cursor = next;
+        self.set_selection_range(self.drag_anchor, next);
+        self.cursor != prev_cursor || self.selection != prev_selection
+    }
+
+    /// Moves the cursor to the end of the text and clears any selection.
+    ///
+    /// Does not start a drag. Use [`Self::click_at`] when the press should anchor one.
+    pub fn click_at_end(&mut self) {
+        self.cursor = self.text.len();
+        self.clear_selection();
+        self.drag_anchor = self.cursor;
+        self.dragging = false;
     }
 
     /// Handles mouse drag when pixel positioning is unavailable.
@@ -507,7 +537,9 @@ impl ComposerEditor {
     // ── rendering ──
 
     /// Renders the composer text with cursor and selection into a GPUI column element.
-    /// Each visual line is a separate row.
+    ///
+    /// Selection uses the historical default highlight. Prefer
+    /// [`Self::render_text_with_selection`] when a theme color is available.
     pub fn render_text(
         &self,
         placeholder: &str,
@@ -515,8 +547,36 @@ impl ComposerEditor {
         placeholder_color: gpui::Hsla,
         accent: gpui::Hsla,
     ) -> impl IntoElement {
+        self.render_text_with_selection(
+            placeholder,
+            text_color,
+            placeholder_color,
+            accent,
+            rgb(0x585b70).into(),
+        )
+    }
+
+    /// Renders the composer text with cursor and a caller-supplied selection color.
+    ///
+    /// Each visual line is a row. Empty lines keep a line box so the caret stays
+    /// attached to the glyphs.
+    pub fn render_text_with_selection(
+        &self,
+        placeholder: &str,
+        text_color: gpui::Hsla,
+        placeholder_color: gpui::Hsla,
+        accent: gpui::Hsla,
+        selection_bg: gpui::Hsla,
+    ) -> impl IntoElement {
+        let text_size = px(self.line_height / 1.45);
+        let line_box = px(self.line_height);
         if self.text.is_empty() {
             return div()
+                .w_full()
+                .font_family("Inter")
+                .text_size(text_size)
+                .line_height(line_box)
+                .min_h(line_box)
                 .text_color(placeholder_color)
                 .child(placeholder.to_string());
         }
@@ -525,7 +585,23 @@ impl ComposerEditor {
         let selection = self.selection;
         let cursor = self.cursor.min(self.text.len());
 
-        let mut col = div().flex().flex_col();
+        let mut col = div()
+            .w_full()
+            .font_family("Inter")
+            .text_size(text_size)
+            .line_height(line_box)
+            .flex()
+            .flex_col()
+            .justify_start();
+
+        let glyph = |content: &str| {
+            div()
+                .font_family("Inter")
+                .text_size(text_size)
+                .text_color(text_color)
+                .flex_shrink_0()
+                .child(content.to_string())
+        };
 
         for (li, &(s, e)) in lines.iter().enumerate() {
             let line_text = &self.text[s..e];
@@ -545,8 +621,9 @@ impl ComposerEditor {
             let local_sel_s = sel_start.saturating_sub(s);
             let local_sel_e = sel_end.saturating_sub(s);
 
-            // Determine cursor within this line
-            let cursor_in_line = cursor >= s && (cursor < e || (cursor == e && is_last));
+            // Empty lines have s == e, so the caret sits on that byte.
+            let cursor_in_line =
+                cursor >= s && (cursor < e || (cursor == e && (is_last || s == e)));
             let local_cursor = if cursor_in_line {
                 cursor.saturating_sub(s)
             } else {
@@ -564,28 +641,40 @@ impl ComposerEditor {
                 (&line_text[..local_cursor], "", &line_text[local_cursor..])
             };
 
-            let mut row = div().flex().flex_row().items_center();
+            let mut line = div().relative().h(line_box).w_full();
+            let mut row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_start()
+                .h(line_box);
 
             if !before.is_empty() {
-                row = row.child(div().text_color(text_color).child(before.to_string()));
+                row = row.child(glyph(before));
             }
-
             if has_sel {
-                row = row.child(
-                    div()
-                        .bg(rgb(0x585b70))
-                        .text_color(text_color)
-                        .child(mid.to_string()),
-                );
-            } else if cursor_in_line && self.cursor_visible {
-                row = row.child(div().w(px(1.5)).h_full().bg(accent).flex_shrink_0());
+                row = row.child(glyph(mid).bg(selection_bg));
             }
-
             if !after.is_empty() {
-                row = row.child(div().text_color(text_color).child(after.to_string()));
+                row = row.child(glyph(after));
+            }
+            line = line.child(row);
+
+            if !has_sel && cursor_in_line && self.cursor_visible {
+                let caret_chars = before.chars().count() as f32;
+                let caret_x = caret_chars * self.char_width;
+                line = line.child(
+                    div()
+                        .absolute()
+                        .left(px(caret_x))
+                        .top(px(1.))
+                        .w(px(1.5))
+                        .h(px(self.line_height * 0.85))
+                        .bg(accent),
+                );
             }
 
-            col = col.child(row.min_h(px(self.line_height)));
+            col = col.child(line);
         }
 
         col

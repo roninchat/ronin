@@ -1,4 +1,4 @@
-//! Bundled Lucide icons and Inter fonts for the GPUI shell.
+//! Bundled Lucide icons, companion sprites, grain texture, and Inter fonts for the GPUI shell.
 //!
 //! Register with `Application::new().with_assets(RoninAssets)` and load fonts via
 //! `cx.text_system().add_fonts(bundled_font_bytes())`.
@@ -57,32 +57,57 @@ const ICON_ASSETS: &[(&str, &[u8])] = &[
     icon_asset!("square.svg"),
 ];
 
+macro_rules! extra_asset {
+    ($path:literal) => {
+        (
+            $path,
+            include_bytes!(concat!("../../../assets/", $path)) as &[u8],
+        )
+    };
+}
+
+const EXTRA_ASSETS: &[(&str, &[u8])] = &[
+    extra_asset!("companion/idle-0.svg"),
+    extra_asset!("companion/idle-1.svg"),
+    extra_asset!("companion/sent.svg"),
+    extra_asset!("companion/new-chat.svg"),
+    extra_asset!("textures/grain.svg"),
+];
+
+fn bundled_assets() -> impl Iterator<Item = (&'static str, &'static [u8])> {
+    ICON_ASSETS
+        .iter()
+        .copied()
+        .chain(EXTRA_ASSETS.iter().copied())
+}
+
 /// Compile-time bundled SVG icons, keyed by `icons/<name>.svg`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RoninAssets;
 
 impl AssetSource for RoninAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        let bytes = ICON_ASSETS
-            .iter()
+        let bytes = bundled_assets()
             .find(|(asset_path, _)| *asset_path == path)
-            .map(|(_, data)| Cow::Borrowed(*data));
+            .map(|(_, data)| Cow::Borrowed(data));
         Ok(bytes)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let prefix = path.trim_matches('/');
-        Ok(ICON_ASSETS
-            .iter()
-            .map(|(asset_path, _)| *asset_path)
-            .filter(|asset_path| icon_is_under_prefix(asset_path, prefix))
+        Ok(bundled_assets()
+            .map(|(asset_path, _)| asset_path)
+            .filter(|asset_path| asset_is_under_prefix(asset_path, prefix))
             .map(SharedString::from)
             .collect())
     }
 }
 
-fn icon_is_under_prefix(asset_path: &str, prefix: &str) -> bool {
-    if prefix.is_empty() || prefix == "icons" {
+fn asset_is_under_prefix(asset_path: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    if prefix == "icons" {
         return asset_path.starts_with("icons/");
     }
     asset_path == prefix

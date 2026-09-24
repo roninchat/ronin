@@ -58,6 +58,9 @@ pub mod theme;
 /// Elevation, empty/error presentations, and streaming motion tokens.
 pub mod visual_polish;
 
+/// In-theme companion sprite and grain overlay.
+pub mod companion;
+
 /// Keyboard-first navigation state machine and shortcut catalog.
 pub mod keyboard_nav;
 

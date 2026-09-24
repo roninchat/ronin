@@ -276,3 +276,18 @@ pub fn generating_label(elapsed_ms: u64, motion: &StreamingMotion) -> String {
     };
     format!("Generating response{dots}")
 }
+
+/// Sidebar width animation duration in milliseconds.
+pub fn sidebar_slide_ms() -> u64 {
+    180
+}
+
+/// Overlay fade duration in milliseconds.
+pub fn overlay_fade_ms() -> u64 {
+    140
+}
+
+/// Send-button pulse duration in milliseconds.
+pub fn send_pulse_ms() -> u64 {
+    220
+}
