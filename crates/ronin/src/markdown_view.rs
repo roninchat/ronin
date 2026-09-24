@@ -293,7 +293,12 @@ pub fn render_highlighted_code_lines(
     theme: &M0Theme,
 ) -> Div {
     let lines = highlight_code(language, content, theme.color_scheme);
-    render_highlighted_lines(&lines)
+    render_code_lines(&lines)
+}
+
+/// Paints code lines that were already highlighted (or left plain while streaming).
+pub fn render_code_lines(lines: &[HighlightedLine]) -> Div {
+    render_highlighted_lines(lines)
 }
 
 fn render_highlighted_lines(lines: &[HighlightedLine]) -> Div {

@@ -824,17 +824,10 @@ impl RoninWindow {
     }
 
     fn render_provider_dot(&self, theme: &M0Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let (label, ok) = match &self.shell.state().provider_status {
-            ProviderStatus::OllamaOnline { model } | ProviderStatus::OpenAiReady { model } => {
-                (model.clone(), true)
-            }
-            ProviderStatus::OllamaOffline => ("Ollama offline".into(), false),
-            ProviderStatus::OllamaNoModels => ("No models".into(), false),
-            ProviderStatus::OpenAiError { .. } | ProviderStatus::OpenAiNotConfigured => {
-                ("OpenAI".into(), false)
-            }
-            ProviderStatus::NotConfigured => ("No provider".into(), false),
-        };
+        let ok = matches!(
+            self.shell.state().provider_status,
+            ProviderStatus::OllamaOnline { .. } | ProviderStatus::OpenAiReady { .. }
+        );
         let color = if ok { theme.accent } else { theme.text_muted };
         div()
             .id("rail-provider")
@@ -852,8 +845,15 @@ impl RoninWindow {
                     cx.notify();
                 }),
             )
-            .child(div().size(px(8.0)).rounded_full().bg(color))
-            .child(div().invisible().child(label))
+            .child(icon(
+                if ok {
+                    IconName::Check
+                } else {
+                    IconName::HelpCircle
+                },
+                color,
+                16.0,
+            ))
     }
 
     pub(crate) fn render_plus_menu(

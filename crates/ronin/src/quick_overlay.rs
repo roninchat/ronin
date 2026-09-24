@@ -64,6 +64,7 @@ pub fn open_quick_overlay_window(
                     current_thread_id,
                     needs_initial_focus: true,
                     status_message: None,
+                    stream_pump_scheduled: false,
                     _appearance_subscription,
                 }
             })
@@ -84,6 +85,7 @@ pub struct QuickModeWindow {
     current_thread_id: Option<String>,
     needs_initial_focus: bool,
     status_message: Option<String>,
+    stream_pump_scheduled: bool,
     _appearance_subscription: gpui::Subscription,
 }
 
@@ -390,8 +392,19 @@ impl Render for QuickModeWindow {
             self.needs_initial_focus = false;
             window.focus(&self.composer_focus);
         }
-        if streaming {
-            cx.notify();
+        if streaming && !self.stream_pump_scheduled {
+            self.stream_pump_scheduled = true;
+            cx.spawn(async move |this, async_cx| {
+                async_cx
+                    .background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+                let _ = this.update(async_cx, |view, cx| {
+                    view.stream_pump_scheduled = false;
+                    cx.notify();
+                });
+            })
+            .detach();
         }
 
         let theme_preference = self

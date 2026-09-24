@@ -90,6 +90,7 @@ use ronin_core::{
     UI_SCALE_DEFAULT,
 };
 
+mod frame_profile;
 mod quick_overlay;
 mod shell_chrome;
 
@@ -303,7 +304,12 @@ pub(crate) fn open_main_window(
                     _appearance_subscription,
                     companion_mood: CompanionMood::Idle,
                     companion_mood_at: std::time::Instant::now(),
+                    companion_epoch: 0,
+                    companion_reset_scheduled: false,
                     send_pulse_at: None,
+                    caret_blink_scheduled: false,
+                    stream_pump_scheduled: false,
+                    frame_profiler: frame_profile::FrameProfiler::new(),
                     sidebar_motion_gen: 0,
                     composer_input_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
                 }
@@ -353,8 +359,7 @@ struct RoninWindow {
     attachment_size_warn: AttachmentSizeWarnState,
     screenshot_capturer: Box<dyn ScreenshotCapturer + Send>,
     desktop_notifier: Box<dyn DesktopNotifier + Send>,
-    parsed_messages:
-        std::collections::HashMap<String, (usize, Vec<ronin::markdown::MarkdownBlock>)>,
+    parsed_messages: std::collections::HashMap<String, CachedMessageView>,
     completion_index: usize,
     /// When set, hides the `@`/`/` picker until the trigger token changes.
     picker_suppressed: Option<String>,
@@ -398,11 +403,51 @@ struct RoninWindow {
     _appearance_subscription: Subscription,
     companion_mood: CompanionMood,
     companion_mood_at: std::time::Instant,
+    companion_epoch: u64,
+    companion_reset_scheduled: bool,
     send_pulse_at: Option<std::time::Instant>,
+    caret_blink_scheduled: bool,
+    stream_pump_scheduled: bool,
+    frame_profiler: frame_profile::FrameProfiler,
     /// Increments on each sidebar toggle so the width animation restarts.
     sidebar_motion_gen: u32,
     /// Last laid-out bounds of the composer text box, in window coordinates.
     composer_input_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+}
+
+#[derive(Clone)]
+struct CachedMessageView {
+    content_len: usize,
+    scheme_dark: bool,
+    highlighted: bool,
+    blocks: Vec<ronin::markdown::MarkdownBlock>,
+    code_lines: Vec<Vec<ronin::syntax_highlight::HighlightedLine>>,
+}
+
+fn build_message_view(
+    content: &str,
+    scheme: ronin_core::ColorScheme,
+    highlight: bool,
+) -> CachedMessageView {
+    let blocks = ronin::markdown::parse_markdown(content);
+    let mut code_lines = Vec::new();
+    for block in &blocks {
+        if let ronin::markdown::MarkdownBlock::CodeBlock { language, content } = block {
+            let lines = if highlight {
+                ronin::syntax_highlight::highlight_code(language.as_deref(), content, scheme)
+            } else {
+                ronin::syntax_highlight::highlight_code(None, content, scheme)
+            };
+            code_lines.push(lines);
+        }
+    }
+    CachedMessageView {
+        content_len: content.len(),
+        scheme_dark: matches!(scheme, ronin_core::ColorScheme::Dark),
+        highlighted: highlight,
+        blocks,
+        code_lines,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2086,6 +2131,23 @@ impl RoninWindow {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         self.copied_state = Some((id, std::time::Instant::now()));
         cx.notify();
+        cx.spawn(async move |this, async_cx| {
+            async_cx
+                .background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                if view
+                    .copied_state
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed().as_secs() >= 1)
+                {
+                    view.copied_state = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn save_as_memory(&mut self, text: String, cx: &mut Context<Self>) {
@@ -2630,11 +2692,100 @@ impl RoninWindow {
         self.companion_mood = CompanionMood::Sent;
         self.companion_mood_at = std::time::Instant::now();
         self.send_pulse_at = Some(self.companion_mood_at);
+        self.companion_epoch = self.companion_epoch.wrapping_add(1);
+        self.companion_reset_scheduled = false;
     }
 
     fn note_new_chat(&mut self) {
         self.companion_mood = CompanionMood::NewChat;
         self.companion_mood_at = std::time::Instant::now();
+        self.companion_epoch = self.companion_epoch.wrapping_add(1);
+        self.companion_reset_scheduled = false;
+    }
+
+    fn message_view(
+        &mut self,
+        id: &str,
+        content: &str,
+        scheme: ronin_core::ColorScheme,
+        highlight: bool,
+    ) -> CachedMessageView {
+        let scheme_dark = matches!(scheme, ronin_core::ColorScheme::Dark);
+        if let Some(hit) = self.parsed_messages.get(id) {
+            if hit.content_len == content.len()
+                && hit.scheme_dark == scheme_dark
+                && (!highlight || hit.highlighted)
+            {
+                return hit.clone();
+            }
+        }
+        let built = build_message_view(content, scheme, highlight);
+        self.parsed_messages.insert(id.to_string(), built.clone());
+        built
+    }
+
+    fn schedule_caret_blink(&mut self, cx: &mut Context<Self>) {
+        if self.caret_blink_scheduled {
+            return;
+        }
+        self.caret_blink_scheduled = true;
+        let motion = streaming_motion();
+        let elapsed = self.blink_start.elapsed().as_millis() as u64;
+        let wait = frame_profile::caret_edge_delay_ms(
+            elapsed,
+            motion.cursor_cycle_ms,
+            motion.cursor_visible_ms,
+        );
+        cx.spawn(async move |this, async_cx| {
+            async_cx
+                .background_executor()
+                .timer(std::time::Duration::from_millis(wait))
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                view.caret_blink_scheduled = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn schedule_stream_pump(&mut self, cx: &mut Context<Self>) {
+        if self.stream_pump_scheduled {
+            return;
+        }
+        self.stream_pump_scheduled = true;
+        cx.spawn(async move |this, async_cx| {
+            async_cx
+                .background_executor()
+                .timer(std::time::Duration::from_millis(50))
+                .await;
+            let _ = this.update(async_cx, |view, cx| {
+                view.stream_pump_scheduled = false;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn schedule_companion_reset(&mut self, cx: &mut Context<Self>) {
+        if self.companion_mood == CompanionMood::Idle || self.companion_reset_scheduled {
+            return;
+        }
+        self.companion_reset_scheduled = true;
+        let epoch = self.companion_epoch;
+        let wait = reaction_hold().saturating_sub(self.companion_mood_at.elapsed());
+        cx.spawn(async move |this, async_cx| {
+            async_cx.background_executor().timer(wait).await;
+            let _ = this.update(async_cx, |view, cx| {
+                view.companion_reset_scheduled = false;
+                if view.companion_epoch == epoch && view.companion_mood != CompanionMood::Idle {
+                    view.companion_mood = CompanionMood::Idle;
+                    view.companion_mood_at = std::time::Instant::now();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn composer_local_point(&self, position: gpui::Point<Pixels>) -> Option<(f32, f32)> {
@@ -3274,26 +3425,24 @@ impl RoninWindow {
         messages_focused: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let messages_opt = self.shell.state().messages.clone();
-        let messages =
-            match messages_opt {
-                Some(msgs) if !msgs.is_empty() => msgs.clone(),
-                _ => {
-                    return div().flex_1().p_6().id("empty-messages").child(
-                        div()
-                            .child(self.render_empty_state(
-                                empty_state(EmptyStateKind::EmptyThread),
-                                theme,
-                            ))
-                            .with_animation(
-                                "empty-thread-in",
-                                Animation::new(std::time::Duration::from_millis(280))
-                                    .with_easing(ease_out_quint()),
-                                |el, delta| el.opacity(0.35 + 0.65 * delta),
-                            ),
-                    );
-                }
-            };
+        let Some(messages) = self
+            .shell
+            .state()
+            .messages
+            .clone()
+            .filter(|msgs| !msgs.is_empty())
+        else {
+            return div().flex_1().p_6().id("empty-messages").child(
+                div()
+                    .child(self.render_empty_state(empty_state(EmptyStateKind::EmptyThread), theme))
+                    .with_animation(
+                        "empty-thread-in",
+                        Animation::new(std::time::Duration::from_millis(280))
+                            .with_easing(ease_out_quint()),
+                        |el, delta| el.opacity(0.35 + 0.65 * delta),
+                    ),
+            );
+        };
 
         let is_generating = self.shell.is_generation_active();
         let last_assistant_id = messages
@@ -3340,24 +3489,12 @@ impl RoninWindow {
                 let mut message_body = div().w_full().min_w_0().flex().flex_col().gap_3();
 
                 if !editing_this {
-                    let blocks =
-                        if let Some((len, cached_blocks)) = self.parsed_messages.get(&msg.id) {
-                            if *len == msg.content.len() {
-                                Some(cached_blocks.clone())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                    let blocks = blocks.unwrap_or_else(|| {
-                        let parsed = ronin::markdown::parse_markdown(&msg.content);
-                        self.parsed_messages
-                            .insert(msg.id.clone(), (msg.content.len(), parsed.clone()));
-                        parsed
-                    });
-
-                    for (block_idx, block) in blocks.into_iter().enumerate() {
+                    let highlight = msg.status != MessageStatus::Streaming;
+                    let view =
+                        self.message_view(&msg.id, &msg.content, theme.color_scheme, highlight);
+                    let mut code_cursor = 0usize;
+                    let code_lines = view.code_lines;
+                    for (block_idx, block) in view.blocks.into_iter().enumerate() {
                         let block_el = match block {
                             ronin::markdown::MarkdownBlock::Paragraph(inlines) => {
                                 ronin::markdown_view::render_inline_flow(&inlines, theme)
@@ -3370,12 +3507,10 @@ impl RoninWindow {
                                     .clone()
                                     .filter(|l| !l.is_empty())
                                     .unwrap_or_else(|| "text".to_string());
-                                let code_lines =
-                                    ronin::markdown_view::render_highlighted_code_lines(
-                                        language.as_deref(),
-                                        &content,
-                                        theme,
-                                    )
+                                let prepared =
+                                    code_lines.get(code_cursor).cloned().unwrap_or_default();
+                                code_cursor += 1;
+                                let code_lines = ronin::markdown_view::render_code_lines(&prepared)
                                     .id(gpui::SharedString::from(format!(
                                         "{}-code-scroll-{}",
                                         msg.id, block_idx
@@ -5991,6 +6126,8 @@ impl Render for RoninWindow {
         {
             self.companion_mood = CompanionMood::Idle;
             self.companion_mood_at = std::time::Instant::now();
+        } else {
+            self.schedule_companion_reset(cx);
         }
         if self
             .send_pulse_at
@@ -5998,14 +6135,24 @@ impl Render for RoninWindow {
         {
             self.send_pulse_at = None;
         }
+        if streaming_active {
+            self.schedule_stream_pump(cx);
+        }
+        if self.composer_focus.is_focused(window) {
+            self.schedule_caret_blink(cx);
+        }
         let companion_elapsed = self.companion_mood_at.elapsed().as_millis() as u64;
         let companion_mood = self.companion_mood;
 
+        self.frame_profiler.begin_frame();
         let titlebar = self.render_titlebar(&theme, &titlebar_title, window, cx);
         let icon_rail = self.render_icon_rail(&theme, sidebar_focused, cx);
         let recents = self.render_sidebar(&theme, sidebar_focused, cx);
+        self.frame_profiler.phase("chrome");
         let messages = self.render_messages(&theme, messages_focused, cx);
+        self.frame_profiler.phase("messages");
         let composer = self.render_composer(&theme, composer_focused, cx);
+        self.frame_profiler.phase("composer");
 
         let main_col = div()
             .relative()
@@ -6103,23 +6250,24 @@ impl Render for RoninWindow {
             ui = ui.child(deferred(self.render_drop_overlay(&theme, cx)).with_priority(4));
         }
 
-        let mut needs_frame = streaming_active
-            || composer_focused
-            || self.sidebar_drag.is_some()
-            || self.file_drop_active
-            || self.shell.is_generation_active()
-            || self.companion_mood != CompanionMood::Idle
-            || self.send_pulse_at.is_some();
-        if let Some((_, time)) = self.copied_state.as_ref() {
-            if time.elapsed().as_secs_f32() >= 1.0 {
-                self.copied_state = None;
-                needs_frame = true;
-            } else {
-                needs_frame = true;
-            }
-        }
-        if needs_frame {
-            window.request_animation_frame();
+        let sample = self.frame_profiler.end_frame();
+        if sample.overlay {
+            ui = ui.child(
+                div()
+                    .absolute()
+                    .top(px(36.0))
+                    .right(px(12.0))
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(theme.surface_muted)
+                    .text_xs()
+                    .text_color(theme.text_primary)
+                    .child(format!(
+                        "{:.0} fps  {:.1} ms  {} {:.1}",
+                        sample.fps, sample.last_ms, sample.slowest, sample.slowest_ms
+                    )),
+            );
         }
         ui
     }

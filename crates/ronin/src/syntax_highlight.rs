@@ -167,3 +167,52 @@ fn theme_set() -> &'static ThemeSet {
     static SET: OnceLock<ThemeSet> = OnceLock::new();
     SET.get_or_init(ThemeSet::load_defaults)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::highlight_code;
+    use ronin_core::ColorScheme;
+
+    fn python_sample() -> String {
+        let body = r#"def classify(rows):
+    total = 0
+    for row in rows:
+        if row.get("ok"):
+            total += int(row["n"])
+        else:
+            total -= 1
+    return {"total": total, "empty": len(rows) == 0}
+"#;
+        body.repeat(40)
+    }
+
+    #[test]
+    fn syntect_highlight_costs_more_than_plain_lines() {
+        let sample = python_sample();
+        let iters = 8u32;
+        let plain_started = Instant::now();
+        for _ in 0..iters {
+            let lines = highlight_code(None, &sample, ColorScheme::Dark);
+            assert!(lines.len() > 100);
+        }
+        let plain = plain_started.elapsed();
+        let hi_started = Instant::now();
+        for _ in 0..iters {
+            let lines = highlight_code(Some("python"), &sample, ColorScheme::Dark);
+            assert!(lines.len() > 100);
+        }
+        let highlighted = hi_started.elapsed();
+        eprintln!(
+            "message hot path: plain {:?}  syntect {:?}  ratio {:.1}x",
+            plain,
+            highlighted,
+            highlighted.as_secs_f64() / plain.as_secs_f64().max(0.000_001)
+        );
+        assert!(
+            highlighted > plain,
+            "syntect should dominate plain line splitting"
+        );
+    }
+}

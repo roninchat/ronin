@@ -63,7 +63,8 @@ pub fn grain_overlay(tint: Hsla) -> impl IntoElement {
     canvas(
         |_bounds, _window, _cx| (),
         move |bounds, _state, window, cx| {
-            let tile = px(64.0);
+            // One sprite per 128px keeps the speckle and cuts paint calls by about 4x.
+            let tile = px(128.0);
             let tile_f: f32 = tile.into();
             let origin_x: f32 = bounds.origin.x.into();
             let origin_y: f32 = bounds.origin.y.into();
