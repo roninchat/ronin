@@ -5,8 +5,8 @@ use gpui::{
     MouseButton, MouseDownEvent, SharedString, Window, WindowControlArea,
 };
 use ronin::chrome::{
-    message_overflow_items_with_flags, thread_overflow_items, window_overflow_items, OverflowItem,
-    ICON_RAIL_WIDTH, TITLEBAR_HEIGHT,
+    message_overflow_items_with_flags, thread_overflow_items_for, window_overflow_items,
+    OverflowItem, ICON_RAIL_WIDTH, TITLEBAR_HEIGHT,
 };
 use ronin::command_palette::{
     command_catalog, filter_items, quick_items, PaletteAction, PaletteItem, PaletteMode,
@@ -14,9 +14,9 @@ use ronin::command_palette::{
 use ronin::icons::{icon, IconName};
 use ronin::plus_menu::{plus_menu_items, PlusMenuItem};
 use ronin::settings_view::{
-    artifacts_toggle_label, auto_title_toggle_label, memories_toggle_label,
-    notifications_toggle_label, scale_label, section_label, shortcut_hints_toggle_label,
-    theme_label, visible_sections, SettingsSection,
+    archive_instead_of_delete_toggle_label, artifacts_toggle_label, auto_title_toggle_label,
+    memories_toggle_label, notifications_toggle_label, scale_label, search_archived_toggle_label,
+    section_label, shortcut_hints_toggle_label, theme_label, visible_sections, SettingsSection,
 };
 use ronin::shortcut_coach::{first_run_steps, should_show_coach};
 use ronin::theme::M0Theme;
@@ -106,6 +106,8 @@ impl RoninWindow {
         self.coach_seen = config.ui.shortcut_coach_seen;
         self.notifications_enabled = config.notifications.enabled;
         self.auto_title = config.general.auto_title;
+        self.archive_instead_of_delete = config.general.archive_instead_of_delete;
+        self.search_archived = config.general.search_archived;
         self.composer_rem = 14.0 * self.ui_scale;
         self.composer.set_font_metrics_from_rem(self.composer_rem);
     }
@@ -367,9 +369,8 @@ impl RoninWindow {
                     .unwrap_or_default();
                 self.copy_to_clipboard(id, title, cx);
             }
-            (Some(ChromeMenu::Thread { .. }), "delete") => {
-                tracing::info!("thread delete is not wired in this shell");
-                cx.notify();
+            (Some(ChromeMenu::Thread { id }), "delete") => {
+                self.remove_thread(&id, self.archive_instead_of_delete, cx);
             }
             (Some(ChromeMenu::Message { content, id, .. }), "copy") => {
                 self.copy_to_clipboard(id, content, cx);
@@ -685,10 +686,10 @@ impl RoninWindow {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut menu = self.menu_surface(theme);
-        for item in thread_overflow_items() {
+        for item in thread_overflow_items_for(self.archive_instead_of_delete) {
             let id = item.id;
             menu = menu.child(overflow_row(
-                *item,
+                item,
                 theme,
                 cx.listener(move |this, _, window, cx| {
                     this.apply_overflow_item(id, window, cx);
@@ -1225,6 +1226,30 @@ impl RoninWindow {
                     cx.listener(|this, _, _, cx| {
                         let next = !this.auto_title;
                         this.persist_config_flag(|config| config.general.auto_title = next, cx);
+                    }),
+                ))
+                .child(self.settings_toggle(
+                    archive_instead_of_delete_toggle_label(),
+                    self.archive_instead_of_delete,
+                    theme,
+                    cx.listener(|this, _, _, cx| {
+                        let next = !this.archive_instead_of_delete;
+                        this.persist_config_flag(
+                            |config| config.general.archive_instead_of_delete = next,
+                            cx,
+                        );
+                    }),
+                ))
+                .child(self.settings_toggle(
+                    search_archived_toggle_label(),
+                    self.search_archived,
+                    theme,
+                    cx.listener(|this, _, _, cx| {
+                        let next = !this.search_archived;
+                        this.persist_config_flag(
+                            |config| config.general.search_archived = next,
+                            cx,
+                        );
                     }),
                 )),
             SettingsSection::Appearance => div()

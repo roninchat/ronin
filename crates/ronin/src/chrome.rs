@@ -106,6 +106,23 @@ pub fn thread_overflow_items() -> &'static [OverflowItem] {
     ]
 }
 
+/// Thread overflow with the remove action labelled for the current setting.
+///
+/// The action id stays `"delete"`; `archive` only changes what the user reads.
+pub fn thread_overflow_items_for(archive: bool) -> Vec<OverflowItem> {
+    thread_overflow_items()
+        .iter()
+        .map(|item| match (item.id, archive) {
+            ("delete", true) => OverflowItem {
+                label: "Archive",
+                icon: IconName::Box,
+                ..*item
+            },
+            _ => *item,
+        })
+        .collect()
+}
+
 /// Message overflow using default flags from the message role/status.
 ///
 /// Always includes copy. Assistant messages include save-memory and save-artifact.

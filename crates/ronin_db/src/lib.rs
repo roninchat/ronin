@@ -130,6 +130,16 @@ pub enum RoninDbError {
         source: rusqlite::Error,
     },
 
+    /// Deleting a thread failed.
+    #[error("failed to delete thread {id}")]
+    DeleteThread {
+        /// Thread id being deleted.
+        id: String,
+        /// Underlying SQLite error.
+        #[source]
+        source: rusqlite::Error,
+    },
+
     /// Creating the migration bookkeeping table failed.
     #[error("failed to create schema_migrations table")]
     CreateSchemaMigrations(#[source] rusqlite::Error),
@@ -641,6 +651,33 @@ impl RoninDb {
                 params![title, now, id],
             )
             .map_err(|source| RoninDbError::UpdateThread {
+                id: id.to_string(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// Marks a thread archived or restores it, and bumps its updated_at timestamp.
+    pub fn set_thread_archived(&self, id: &str, archived: bool) -> Result<()> {
+        let now = unix_timestamp_millis();
+        self.conn
+            .execute(
+                "UPDATE threads SET archived = ?1, updated_at = ?2 WHERE id = ?3",
+                params![i64::from(archived), now, id],
+            )
+            .map_err(|source| RoninDbError::UpdateThread {
+                id: id.to_string(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    /// Deletes a thread. Its messages, artifacts, attachments, and workspace
+    /// index go with it through `ON DELETE CASCADE`.
+    pub fn delete_thread(&self, id: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM threads WHERE id = ?1", params![id])
+            .map_err(|source| RoninDbError::DeleteThread {
                 id: id.to_string(),
                 source,
             })?;

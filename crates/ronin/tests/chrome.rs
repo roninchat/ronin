@@ -2,7 +2,8 @@
 
 use ronin::chrome::{
     message_overflow_items, message_overflow_items_with_flags, thread_overflow_items,
-    window_overflow_items, ICON_RAIL_WIDTH, TITLEBAR_HEIGHT, WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
+    thread_overflow_items_for, window_overflow_items, ICON_RAIL_WIDTH, TITLEBAR_HEIGHT,
+    WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH,
 };
 
 fn ids(items: &[ronin::chrome::OverflowItem]) -> Vec<&'static str> {
@@ -31,6 +32,18 @@ fn window_overflow_should_include_settings_shortcuts_zoom_and_sidebar() {
 #[test]
 fn thread_overflow_should_include_rename() {
     assert!(ids(thread_overflow_items()).contains(&"rename"));
+}
+
+#[test]
+fn thread_overflow_remove_label_should_follow_archive_setting() {
+    let label = |archive| {
+        thread_overflow_items_for(archive)
+            .into_iter()
+            .find(|item| item.id == "delete")
+            .map(|item| item.label)
+    };
+    assert_eq!(label(false), Some("Delete"));
+    assert_eq!(label(true), Some("Archive"));
 }
 
 #[test]

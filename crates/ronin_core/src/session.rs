@@ -127,6 +127,18 @@ impl RoninSession {
             .map_err(Into::into)
     }
 
+    /// Archives or restores a thread.
+    pub fn set_thread_archived(&self, thread_id: &str, archived: bool) -> Result<()> {
+        self.db
+            .set_thread_archived(thread_id, archived)
+            .map_err(Into::into)
+    }
+
+    /// Permanently deletes a thread with its messages, artifacts, and attachments.
+    pub fn delete_thread(&self, thread_id: &str) -> Result<()> {
+        self.db.delete_thread(thread_id).map_err(Into::into)
+    }
+
     /// Updates a thread's title and bumps its updated_at timestamp.
     pub fn update_thread_title(&self, thread_id: &str, title: &str) -> Result<()> {
         self.db

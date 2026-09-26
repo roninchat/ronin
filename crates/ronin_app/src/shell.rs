@@ -64,8 +64,10 @@ pub enum StreamUpdate {
 pub struct ShellState {
     /// Native window title.
     pub window_title: String,
-    /// Persisted threads visible in sidebar.
+    /// Persisted threads visible in sidebar. Archived threads are not in this list.
     pub threads: Vec<Thread>,
+    /// Archived threads, reachable through search but hidden from the sidebar.
+    pub archived_threads: Vec<Thread>,
     /// Currently selected thread id, if any.
     pub selected_thread_id: Option<String>,
     /// Sidebar provider/model status.
@@ -78,6 +80,35 @@ pub struct ShellState {
     pub truncation_notice: bool,
     /// Thread id currently waiting on a model title-generation request, if any.
     pub title_generating_thread_id: Option<String>,
+}
+
+impl ShellState {
+    /// Finds a thread by id among visible and archived threads.
+    pub fn thread(&self, thread_id: &str) -> Option<&Thread> {
+        self.threads
+            .iter()
+            .chain(&self.archived_threads)
+            .find(|t| t.id == thread_id)
+    }
+
+    /// Whether the selected thread is archived.
+    pub fn selected_is_archived(&self) -> bool {
+        self.selected_thread_id
+            .as_deref()
+            .is_some_and(|id| self.archived_threads.iter().any(|t| t.id == id))
+    }
+}
+
+/// Makes sure at least one sidebar thread exists and returns the id to select.
+fn ensure_visible_thread(session: &RoninSession, threads: &mut Vec<Thread>) -> Result<String> {
+    if let Some(thread) = threads.iter().find(|t| !t.archived) {
+        return Ok(thread.id.clone());
+    }
+    let thread = session.create_thread()?;
+    tracing::info!("ronin shell created initial thread");
+    let id = thread.id.clone();
+    threads.push(thread);
+    Ok(id)
 }
 
 fn persist_context_attachments(
@@ -220,11 +251,7 @@ impl RoninShell {
     ) -> Result<Self> {
         let session = RoninSession::open(paths)?;
         let mut threads = session.list_threads()?;
-        if threads.is_empty() {
-            threads.push(session.create_thread()?);
-            tracing::info!("ronin shell created initial thread");
-        }
-        let selected_thread_id = threads.first().map(|thread| thread.id.clone());
+        let selected_thread_id = Some(ensure_visible_thread(&session, &mut threads)?);
 
         let provider_status = probe_provider_status(&provider, &session);
         tracing::info!(
@@ -245,11 +272,7 @@ impl RoninShell {
     pub fn open(paths: RoninPaths) -> Result<Self> {
         let session = RoninSession::open(paths)?;
         let mut threads = session.list_threads()?;
-        if threads.is_empty() {
-            threads.push(session.create_thread()?);
-            tracing::info!("ronin shell created initial thread");
-        }
-        let selected_thread_id = threads.first().map(|thread| thread.id.clone());
+        let selected_thread_id = Some(ensure_visible_thread(&session, &mut threads)?);
         tracing::info!(thread_count = threads.len(), "ronin shell state restored");
 
         Ok(Self::from_session(
@@ -300,11 +323,13 @@ impl RoninShell {
             clipboard_watch.enable(None);
         }
 
+        let (archived_threads, threads) = threads.into_iter().partition(|t| t.archived);
         Self {
             session,
             state: ShellState {
                 window_title: "Ronin".to_string(),
                 threads,
+                archived_threads,
                 selected_thread_id,
                 provider_status: status,
                 connection_test: None,
@@ -371,9 +396,7 @@ impl RoninShell {
         let thread = self.create_new_thread()?;
         self.save_quick_exchange_to_thread(&thread.id, question, answer)?;
         // Reload so selected state reflects the exchange and derived title.
-        if let Ok(threads) = self.session.list_threads() {
-            self.state.threads = threads;
-        }
+        let _ = self.load_threads();
         self.state.messages = self.session.list_messages(&thread.id).ok();
         let selected = self
             .state
@@ -398,21 +421,14 @@ impl RoninShell {
         if self.state.selected_thread_id.as_deref() == Some(thread_id) {
             self.state.messages = self.session.list_messages(thread_id).ok();
         }
-        if let Ok(threads) = self.session.list_threads() {
-            self.state.threads = threads;
-        }
+        let _ = self.load_threads();
         tracing::info!(%thread_id, "ronin shell saved quick exchange to thread");
         Ok(())
     }
 
     /// Selects a loaded thread from the sidebar.
     pub fn select_thread(&mut self, thread_id: &str) -> Result<()> {
-        let exists = self
-            .state
-            .threads
-            .iter()
-            .any(|thread| thread.id.as_str() == thread_id);
-        if !exists {
+        if self.state.thread(thread_id).is_none() {
             return Err(RoninAppError::ThreadNotLoaded {
                 thread_id: thread_id.to_string(),
             });
@@ -503,7 +519,7 @@ impl RoninShell {
         self.session.set_thread_provider(thread_id, provider)?;
         self.session.set_thread_model(thread_id, model)?;
         self.session.save_selected_model(model)?;
-        self.state.threads = self.session.list_threads()?;
+        self.load_threads()?;
         if self.state.selected_thread_id.as_deref() == Some(thread_id) {
             match provider {
                 "openai" => {
@@ -537,14 +553,14 @@ impl RoninShell {
         root: impl AsRef<std::path::Path>,
     ) -> Result<()> {
         self.session.set_thread_workspace_root(thread_id, root)?;
-        self.state.threads = self.session.list_threads()?;
+        self.load_threads()?;
         Ok(())
     }
 
     /// Clears the workspace root on a thread and refreshes sidebar state.
     pub fn clear_thread_workspace_root(&mut self, thread_id: &str) -> Result<()> {
         self.session.clear_thread_workspace_root(thread_id)?;
-        self.state.threads = self.session.list_threads()?;
+        self.load_threads()?;
         Ok(())
     }
 
@@ -655,11 +671,65 @@ impl RoninShell {
         Ok(out)
     }
 
+    fn load_threads(&mut self) -> Result<()> {
+        let (archived, visible) = self
+            .session
+            .list_threads()?
+            .into_iter()
+            .partition(|t| t.archived);
+        self.state.threads = visible;
+        self.state.archived_threads = archived;
+        Ok(())
+    }
+
+    /// Deletes a thread, or archives it when `archive` is set, and moves the
+    /// selection to a neighbouring sidebar thread if it was open.
+    ///
+    /// Deleting drops the thread's messages, artifacts, and attachments from
+    /// the database. A new empty chat is created when nothing is left to show.
+    pub fn remove_thread(&mut self, thread_id: &str, archive: bool) -> Result<()> {
+        let sidebar_index = self.state.threads.iter().position(|t| t.id == thread_id);
+        self.cancel_streaming_for_thread(thread_id)?;
+        self.manual_titles.remove(thread_id);
+        if archive {
+            self.session.set_thread_archived(thread_id, true)?;
+        } else {
+            self.session.delete_thread(thread_id)?;
+        }
+        self.load_threads()?;
+        tracing::info!(thread_id, archive, "ronin shell removed thread");
+
+        if self.state.selected_thread_id.as_deref() != Some(thread_id) {
+            return Ok(());
+        }
+        let next = sidebar_index
+            .and_then(|index| {
+                self.state
+                    .threads
+                    .get(index)
+                    .or_else(|| self.state.threads.get(index.wrapping_sub(1)))
+            })
+            .or_else(|| self.state.threads.first())
+            .map(|t| t.id.clone());
+        match next {
+            Some(id) => self.select_thread(&id),
+            None => self.create_new_thread().map(|_| ()),
+        }
+    }
+
+    /// Moves an archived thread back into the sidebar.
+    pub fn restore_thread(&mut self, thread_id: &str) -> Result<()> {
+        self.session.set_thread_archived(thread_id, false)?;
+        self.load_threads()?;
+        tracing::info!(thread_id, "ronin shell restored archived thread");
+        Ok(())
+    }
+
     /// Reloads thread list (and selected messages) from the session database.
     pub fn reload_threads(&mut self) -> Result<()> {
-        self.state.threads = self.session.list_threads()?;
+        self.load_threads()?;
         if let Some(id) = self.state.selected_thread_id.clone() {
-            if self.state.threads.iter().any(|t| t.id == id) {
+            if self.state.thread(&id).is_some() {
                 self.state.messages = self.session.list_messages(&id).ok();
             } else {
                 self.state.selected_thread_id = self.state.threads.first().map(|t| t.id.clone());
@@ -1693,7 +1763,7 @@ impl RoninShell {
             .collect();
         let leaf = leaf_under_root(&nodes, message_id);
         self.session.set_active_leaf(thread_id, &leaf)?;
-        self.state.threads = self.session.list_threads()?;
+        self.load_threads()?;
         self.state.messages = Some(self.session.list_messages(thread_id)?);
         Ok(())
     }

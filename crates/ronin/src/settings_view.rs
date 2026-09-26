@@ -143,6 +143,16 @@ pub fn auto_title_toggle_label() -> &'static str {
     "Auto-generate thread titles"
 }
 
+/// General: the thread "Delete" action archives instead of deleting.
+pub fn archive_instead_of_delete_toggle_label() -> &'static str {
+    "Archive chats instead of deleting"
+}
+
+/// General: global search includes archived chats.
+pub fn search_archived_toggle_label() -> &'static str {
+    "Include archived chats in search"
+}
+
 /// Appearance: color scheme preference.
 pub fn theme_label() -> &'static str {
     "Theme"

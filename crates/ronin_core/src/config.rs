@@ -92,9 +92,19 @@ pub struct GeneralConfig {
     /// Character threshold for attachment size warnings before send.
     #[serde(default = "default_attachment_warn_chars")]
     pub attachment_warn_chars: usize,
+    /// When true, the thread "Delete" action archives instead of deleting.
+    #[serde(default)]
+    pub archive_instead_of_delete: bool,
+    /// When true, global search also covers archived threads.
+    #[serde(default = "default_search_archived")]
+    pub search_archived: bool,
 }
 
 fn default_auto_title() -> bool {
+    true
+}
+
+fn default_search_archived() -> bool {
     true
 }
 
@@ -109,6 +119,8 @@ impl Default for GeneralConfig {
             default_model: None,
             auto_title: true,
             attachment_warn_chars: default_attachment_warn_chars(),
+            archive_instead_of_delete: false,
+            search_archived: default_search_archived(),
         }
     }
 }

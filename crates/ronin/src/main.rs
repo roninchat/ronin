@@ -238,7 +238,14 @@ pub(crate) fn open_main_window(
                     .load_config()
                     .map(|config| (config.notifications.enabled, config.general.auto_title))
                     .unwrap_or((true, true));
+                let general = shell
+                    .session()
+                    .load_config()
+                    .map(|config| config.general)
+                    .unwrap_or_default();
                 RoninWindow {
+                    archive_instead_of_delete: general.archive_instead_of_delete,
+                    search_archived: general.search_archived,
                     shell,
                     composer,
                     instance_primary,
@@ -437,6 +444,10 @@ struct RoninWindow {
     stream_pump_scheduled: bool,
     frame_profiler: frame_profile::FrameProfiler,
     perf_scenario_started: bool,
+    /// Thread "Delete" archives instead (settings toggle).
+    archive_instead_of_delete: bool,
+    /// Global search covers archived threads (settings toggle).
+    search_archived: bool,
     last_clipboard_poll: std::time::Instant,
     window_title: String,
     /// Increments on each sidebar toggle so the width animation restarts.
@@ -2257,11 +2268,33 @@ impl RoninWindow {
 
     fn build_search_corpus(&self) -> Vec<SearchDocument> {
         let mut docs = Vec::new();
-        let threads = self.shell.state().threads.clone();
-        for thread in &threads {
+        let state = self.shell.state();
+        let mut threads: Vec<(ronin_core::Thread, String)> = state
+            .threads
+            .iter()
+            .map(|t| (t.clone(), t.title.clone()))
+            .collect();
+        if self.search_archived {
+            threads.extend(
+                state
+                    .archived_threads
+                    .iter()
+                    .map(|t| (t.clone(), format!("{} · Archived", t.title))),
+            );
+        }
+        let hidden_archived: std::collections::HashSet<String> = if self.search_archived {
+            Default::default()
+        } else {
+            state
+                .archived_threads
+                .iter()
+                .map(|t| t.id.clone())
+                .collect()
+        };
+        for (thread, title) in &threads {
             docs.push(thread_title_document(
                 &thread.id,
-                &thread.title,
+                title,
                 thread.provider.as_deref(),
                 thread.model.as_deref(),
                 thread.created_at,
@@ -2274,7 +2307,7 @@ impl RoninWindow {
                     docs.push(thread_message_document(
                         &thread.id,
                         &msg.id,
-                        &thread.title,
+                        title,
                         &msg.content,
                         thread.provider.as_deref(),
                         thread.model.as_deref(),
@@ -2285,6 +2318,9 @@ impl RoninWindow {
         }
         if let Ok(artifacts) = self.shell.list_all_artifacts() {
             for art in artifacts {
+                if hidden_archived.contains(&art.thread_id) {
+                    continue;
+                }
                 docs.push(artifact_document(
                     &art.id.0,
                     &art.title,
@@ -2724,6 +2760,48 @@ impl RoninWindow {
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.set_sidebar_collapsed_to(!self.sidebar_collapsed, cx);
+    }
+
+    /// Deletes or archives a thread and drops its cached message views.
+    fn remove_thread(&mut self, thread_id: &str, archive: bool, cx: &mut Context<Self>) {
+        let message_ids: Vec<String> = self
+            .shell
+            .session()
+            .list_all_messages(thread_id)
+            .map(|messages| messages.into_iter().map(|m| m.id).collect())
+            .unwrap_or_default();
+        if let Err(error) = self.shell.remove_thread(thread_id, archive) {
+            tracing::error!(%error, thread_id, archive, "failed to remove thread");
+            cx.notify();
+            return;
+        }
+        for id in &message_ids {
+            self.parsed_messages.remove(id);
+            self.message_attachments.remove(id);
+            self.pending_highlights.remove(id);
+        }
+        if self
+            .copied_state
+            .as_ref()
+            .is_some_and(|(id, _)| message_ids.contains(id))
+        {
+            self.copied_state = None;
+        }
+        if self
+            .pending_scroll_message_id
+            .as_ref()
+            .is_some_and(|id| message_ids.contains(id))
+        {
+            self.pending_scroll_message_id = None;
+        }
+        cx.notify();
+    }
+
+    fn restore_thread(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        if let Err(error) = self.shell.restore_thread(thread_id) {
+            tracing::error!(%error, thread_id, "failed to restore thread");
+        }
+        cx.notify();
     }
 
     fn note_outgoing(&mut self) {
@@ -3727,16 +3805,17 @@ impl RoninWindow {
                     window.focus(&this.messages_focus);
                     cx.notify();
                 }),
-            )
-            .child(
-                list(
-                    self.message_list.clone(),
-                    cx.processor(|this, ix: usize, window, cx| {
-                        this.render_message_row(ix, window, cx)
-                    }),
-                )
-                .size_full(),
             );
+        if self.shell.state().selected_is_archived() {
+            column = column.child(self.render_archived_banner(theme, cx));
+        }
+        column = column.child(
+            list(
+                self.message_list.clone(),
+                cx.processor(|this, ix: usize, window, cx| this.render_message_row(ix, window, cx)),
+            )
+            .size_full(),
+        );
         if self.shell.is_generation_active() {
             let motion = streaming_motion();
             let elapsed = self.blink_start.elapsed().as_millis() as u64;
@@ -3750,6 +3829,65 @@ impl RoninWindow {
             );
         }
         column.into_any_element()
+    }
+
+    /// Strip above an archived chat opened from search.
+    fn render_archived_banner(&self, theme: &M0Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(thread_id) = self.shell.state().selected_thread_id.clone() else {
+            return div();
+        };
+        let action = |id: &'static str, label: &'static str, color: gpui::Hsla| {
+            div()
+                .id(id)
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .text_xs()
+                .text_color(color)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.surface_hover))
+                .child(label)
+        };
+        div()
+            .mx_6()
+            .mt_4()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .bg(theme.surface_muted)
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(theme.text_muted)
+                    .child("This chat is archived. It is hidden from the sidebar."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .child(
+                        action("archived-restore", "Restore", theme.accent).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener({
+                                let thread_id = thread_id.clone();
+                                move |this, _, _, cx| this.restore_thread(&thread_id, cx)
+                            }),
+                        ),
+                    )
+                    .child(
+                        action("archived-delete", "Delete", theme.text_muted).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.remove_thread(&thread_id, false, cx)
+                            }),
+                        ),
+                    ),
+            )
     }
 
     fn render_message_row(
@@ -6532,9 +6670,9 @@ impl Render for RoninWindow {
 impl RoninWindow {
     fn current_thread_title(state: &ShellState) -> Option<&str> {
         state
-            .threads
-            .iter()
-            .find(|t| Some(t.id.as_str()) == state.selected_thread_id.as_deref())
+            .selected_thread_id
+            .as_deref()
+            .and_then(|id| state.thread(id))
             .map(|t| t.title.as_str())
     }
 }

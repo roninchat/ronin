@@ -24,6 +24,7 @@ fn export_provider_config_should_include_base_urls_and_model_selection() {
             default_model: Some("llama3.2".into()),
             auto_title: true,
             attachment_warn_chars: 24_000,
+            ..GeneralConfig::default()
         },
         ollama: OllamaConfig {
             base_url: "http://192.168.1.50:11434".into(),
@@ -158,6 +159,7 @@ fn session_should_export_and_import_provider_config_files() {
                 default_model: Some("mistral".into()),
                 auto_title: true,
                 attachment_warn_chars: 24_000,
+                ..GeneralConfig::default()
             },
             ollama: OllamaConfig {
                 base_url: "http://export-host:11434".into(),
