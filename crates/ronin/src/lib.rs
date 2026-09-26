@@ -70,6 +70,9 @@ pub mod thread_titles;
 /// Post-send message edit drafts and branch navigation labels.
 pub mod message_branches;
 
+/// Chat-switch timings that name the slowest component.
+pub mod switch_profile;
+
 /// Global search across threads, artifacts, and memories.
 pub mod global_search;
 

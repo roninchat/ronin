@@ -280,6 +280,38 @@ pub(crate) fn probe_ollama_status(
     }
 }
 
+/// Provider family stored on [`ProviderStatus`], when one has been probed.
+pub(crate) fn provider_kind(status: &ProviderStatus) -> Option<&'static str> {
+    match status {
+        ProviderStatus::NotConfigured => None,
+        ProviderStatus::OllamaOffline
+        | ProviderStatus::OllamaOnline { .. }
+        | ProviderStatus::OllamaNoModels => Some("ollama"),
+        ProviderStatus::OpenAiReady { .. }
+        | ProviderStatus::OpenAiError { .. }
+        | ProviderStatus::OpenAiNotConfigured => Some("openai"),
+    }
+}
+
+fn provider_family(provider: &str) -> &'static str {
+    if provider == "openai" {
+        "openai"
+    } else {
+        "ollama"
+    }
+}
+
+/// Whether selecting a thread should block on a provider health check.
+///
+/// Health is a property of the provider, not the thread. Switching between
+/// two chats on the same provider keeps the status already on screen.
+pub(crate) fn should_probe_on_thread_switch(status: &ProviderStatus, next_provider: &str) -> bool {
+    match provider_kind(status) {
+        Some(current) => current != provider_family(next_provider),
+        None => true,
+    }
+}
+
 /// Probes any provider, routing on its reported name.
 pub(crate) fn probe_provider_status(
     provider: &impl OllamaProvider,
@@ -289,5 +321,48 @@ pub(crate) fn probe_provider_status(
         probe_openai_status(provider, session)
     } else {
         probe_ollama_status(provider, session)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_probe_on_thread_switch, ProviderStatus};
+
+    #[test]
+    fn should_probe_on_thread_switch_should_skip_when_provider_family_matches() {
+        assert!(!should_probe_on_thread_switch(
+            &ProviderStatus::OllamaOnline {
+                model: "llama3.2".into(),
+            },
+            "ollama",
+        ));
+        assert!(!should_probe_on_thread_switch(
+            &ProviderStatus::OllamaOffline,
+            "ollama",
+        ));
+        assert!(!should_probe_on_thread_switch(
+            &ProviderStatus::OpenAiReady {
+                model: "gpt-4o".into(),
+            },
+            "openai",
+        ));
+    }
+
+    #[test]
+    fn should_probe_on_thread_switch_should_probe_when_provider_changes_or_is_unknown() {
+        assert!(should_probe_on_thread_switch(
+            &ProviderStatus::NotConfigured,
+            "ollama",
+        ));
+        assert!(should_probe_on_thread_switch(
+            &ProviderStatus::OllamaOnline {
+                model: "llama3.2".into(),
+            },
+            "openai",
+        ));
+        assert!(should_probe_on_thread_switch(
+            &ProviderStatus::OpenAiNotConfigured,
+            "ollama",
+        ));
     }
 }

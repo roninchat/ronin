@@ -301,28 +301,78 @@ pub fn render_code_lines(lines: &[HighlightedLine]) -> Div {
     render_highlighted_lines(lines)
 }
 
+/// One [`StyledText`] per block with a [`TextRun`] per color change. A div per
+/// span costs a layout node and a shaped line each, which dominated frames with
+/// a few code blocks on screen.
 fn render_highlighted_lines(lines: &[HighlightedLine]) -> Div {
-    let mut code_lines = div().w_full().font_family("Inter").flex().flex_col();
-    for line in lines {
-        let mut row = div().flex().flex_row().flex_wrap();
-        if line.spans.is_empty() || (line.spans.len() == 1 && line.spans[0].text.is_empty()) {
-            row = row.child(div().child(" "));
-        } else {
-            for span in &line.spans {
-                let (r, g, b) = span.rgb;
-                let color = rgb(((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
-                row = row.child(div().text_color(color).child(span.text.clone()));
-            }
+    let (text, runs) = code_text_parts(lines);
+    div()
+        .w_full()
+        .font_family("Inter")
+        .child(styled_text_from_parts(text, runs))
+}
+
+fn code_text_parts(lines: &[HighlightedLine]) -> (String, Vec<TextRun>) {
+    let face = font("Inter");
+    let mut text = String::new();
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut push = |piece: &str, color: gpui::Hsla, text: &mut String| {
+        if piece.is_empty() {
+            return;
         }
-        code_lines = code_lines.child(row);
+        text.push_str(piece);
+        match runs.last_mut() {
+            Some(last) if last.color == color => last.len += piece.len(),
+            _ => runs.push(TextRun {
+                len: piece.len(),
+                font: face.clone(),
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }),
+        }
+    };
+    let mut color = gpui::Hsla::from(rgb(0x888888));
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            push("\n", color, &mut text);
+        }
+        for span in &line.spans {
+            let (r, g, b) = span.rgb;
+            color = rgb(((r as u32) << 16) | ((g as u32) << 8) | (b as u32)).into();
+            push(&span.text, color, &mut text);
+        }
     }
-    code_lines
+    (text, runs)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syntax_highlight::HighlightedSpan;
     use crate::theme::M0Theme;
+
+    #[test]
+    fn code_text_parts_should_join_lines_and_cover_every_byte() {
+        let span = |text: &str, rgb| HighlightedSpan {
+            text: text.to_string(),
+            rgb,
+        };
+        let lines = vec![
+            HighlightedLine {
+                spans: vec![span("let", (1, 2, 3)), span(" x", (4, 5, 6))],
+            },
+            HighlightedLine { spans: vec![] },
+            HighlightedLine {
+                spans: vec![span("x", (4, 5, 6))],
+            },
+        ];
+        let (text, runs) = code_text_parts(&lines);
+        assert_eq!(text, "let x\n\nx");
+        assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), text.len());
+        assert_eq!(runs.len(), 2);
+    }
 
     #[test]
     fn split_long_word_should_return_word_unchanged_when_short() {

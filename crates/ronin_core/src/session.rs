@@ -650,11 +650,7 @@ impl RoninSession {
     /// Lists messages on the active conversation path for a thread.
     pub fn list_messages(&self, thread_id: &str) -> Result<Vec<Message>> {
         let all = self.list_all_messages(thread_id)?;
-        let leaf = self
-            .list_threads()?
-            .into_iter()
-            .find(|t| t.id == thread_id)
-            .and_then(|t| t.active_leaf_id);
+        let leaf = self.db.thread_active_leaf(thread_id)?;
         if leaf.is_none() && all.iter().all(|m| m.parent_id.is_none()) {
             return Ok(all);
         }

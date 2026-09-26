@@ -17,8 +17,8 @@ use crate::chat::{
 };
 use crate::error::{Result, RoninAppError};
 use crate::status::{
-    format_provider_error, probe_provider_status, run_connection_test, ConnectionTestResult,
-    ProviderStatus,
+    format_provider_error, probe_provider_status, run_connection_test,
+    should_probe_on_thread_switch, ConnectionTestResult, ProviderStatus,
 };
 use crate::tools::next_tool_result;
 
@@ -421,9 +421,37 @@ impl RoninShell {
         self.state.selected_thread_id = Some(thread_id.to_string());
         self.state.messages = self.session.list_messages(thread_id).ok();
         self.apply_live_stream_overlay(thread_id);
-        let _ = self.refresh_provider_status();
+        self.note_thread_provider(thread_id);
         tracing::info!(thread_id, "ronin shell selected thread");
         Ok(())
+    }
+
+    /// Keeps the sidebar provider line in sync without a health check when the
+    /// selected thread uses the provider already on screen.
+    fn note_thread_provider(&mut self, thread_id: &str) {
+        let Ok((provider, model)) = self.resolve_thread_provider_and_model(thread_id) else {
+            let _ = self.refresh_provider_status();
+            return;
+        };
+        if should_probe_on_thread_switch(&self.state.provider_status, &provider) {
+            let _ = self.refresh_provider_status();
+            return;
+        }
+        match provider.as_str() {
+            "openai" => {
+                if let ProviderStatus::OpenAiReady { model: slot } = &mut self.state.provider_status
+                {
+                    *slot = model;
+                }
+            }
+            _ => {
+                if let ProviderStatus::OllamaOnline { model: slot } =
+                    &mut self.state.provider_status
+                {
+                    *slot = model;
+                }
+            }
+        }
     }
 
     /// Overlays in-memory streamed content onto the selected thread's messages.

@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Long chat lag</title>
+<style>
+  body {
+    font: 17px/1.5 "Iowan Old Style", Palatino, Georgia, serif;
+    margin: 2.5rem auto;
+    max-width: 44rem;
+    color: #1c1917;
+    background: #faf7f2;
+    padding: 0 1.25rem 3rem;
+  }
+  h1 { font-size: 1.7rem; font-weight: 600; line-height: 1.25; margin-bottom: 0.4rem; }
+  h2 { font-size: 1.15rem; font-weight: 600; margin-top: 2rem; }
+  p, li { color: #292524; }
+  code { font-family: ui-monospace, "Cascadia Code", monospace; font-size: 0.88em; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { text-align: left; padding: 0.4rem 0.35rem; border-top: 1px solid #e7e0d6; vertical-align: middle; }
+  th { font-size: 0.85rem; font-weight: 600; border-top: none; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .note { font-size: 0.95rem; color: #44403c; }
+</style>
+</head>
+<body>
+<h1>Long chats laid out every message on every frame</h1>
+<p>The sidebar animation, typing, and scrolling all lagged in long chats for the same reason. Each frame rebuilt and laid out the whole thread, not just what was on screen. The sidebar slide asks for a frame every 16 ms and changes the chat column's width each time, so every message was re-wrapped about ten times per toggle.</p>
+<p>With 400 messages, a sidebar frame took 180 ms at the median, and 149 ms of that was GPUI layout. A typing frame took 630 ms. After the changes below, the same frames take 3 to 5 ms.</p>
+
+<h2>Frame times in the live window, 400-message chat</h2>
+<table>
+  <tr><th>Scenario</th><th class="num">Before, p50</th><th class="num">Before, p95</th><th class="num">After, p50</th><th class="num">After, p95</th></tr>
+  <tr><td>Sidebar collapse and expand</td><td class="num">180.2 ms</td><td class="num">347.6 ms</td><td class="num">3.9 ms</td><td class="num">10.7 ms</td></tr>
+  <tr><td>Switching between two long chats</td><td class="num">75.1 ms</td><td class="num">166.5 ms</td><td class="num">3.9 ms</td><td class="num">8.3 ms</td></tr>
+  <tr><td>Typing in the composer</td><td class="num">629.9 ms</td><td class="num">833.9 ms</td><td class="num">3.3 ms</td><td class="num">4.6 ms</td></tr>
+  <tr><td>Page scrolling</td><td class="num">797.9 ms</td><td class="num">872.4 ms</td><td class="num">3.1 ms</td><td class="num">3.3 ms</td></tr>
+</table>
+<p class="note">Before, only 28 frames rendered across ten sidebar toggles; after, 123. The before numbers for sidebar and switch are flattered by the old placeholder budget, which still had most rows as gray bars at that point. Typing and scrolling ran after every row was revealed, and show the real cost of a fully painted thread.</p>
+
+<h2>Fixes, and what each one bought</h2>
+<table>
+  <tr><th>Change</th><th class="num">Sidebar p50 after</th></tr>
+  <tr><td>Baseline</td><td class="num">180.2 ms</td></tr>
+  <tr><td>Virtualized message list, shared cached views, attachment cache, background highlighting</td><td class="num">9.0 ms</td></tr>
+  <tr><td>Code blocks as one styled text instead of a div per token</td><td class="num">4.5 ms</td></tr>
+  <tr><td>Clipboard poll throttle, window title set only on change</td><td class="num">3.9 ms</td></tr>
+</table>
+<ul>
+  <li><strong>Virtualized list.</strong> The chat column is now a GPUI <code>list</code> with <code>ListState</code>, bottom-aligned. Only rows in view (plus 800 px of overdraw) are built and measured. Rows off screen keep their cached height. A width change during the slide re-measures only the visible rows, about three per frame instead of 400.</li>
+  <li><strong>No per-frame copies.</strong> <code>render_messages</code> used to clone every message and deep-clone every cached markdown view each frame. Rows now read one message by index, and cached views are shared behind <code>Rc</code>.</li>
+  <li><strong>Attachments cached.</strong> Each row ran a SQLite query for its attachments on every frame. The result is now cached per message and cleared on a thread switch.</li>
+  <li><strong>Plain first, colors later.</strong> A row whose code has not been highlighted yet shows plain code right away, and <code>syntect</code> runs on a background thread for that message only. This replaces the skeleton placeholders from the last pass: nothing waits on a gray bar any more.</li>
+  <li><strong>Code blocks as one text element.</strong> Highlighted code created a div per token per line, hundreds of layout nodes per block. Each block is now a single <code>StyledText</code> with a color run per token.</li>
+  <li><strong>Per-frame work in <code>render</code>.</strong> With clipboard watch on, every frame read the system clipboard. That now happens at most every 500 ms. The window title was sent to the compositor on every frame, and now only when it changes.</li>
+</ul>
+
+<h2>The tools</h2>
+<p><code>RONIN_FPS=1</code> still shows the overlay. The frame profiler now also measures GPUI layout and paint, via a zero-size probe element at the end of the tree. Before, it only timed element construction, which is why the earlier pass missed this.</p>
+<p><code>RONIN_PERF_SCENARIO=1</code> drives the window through ten sidebar toggles, eight chat switches, typing, and scrolling. It then writes p50, p95, and max frame times, the render, layout, and paint split, and rows built per frame to <code>RONIN_PERF_OUT</code>, and quits.</p>
+<pre><code>cargo run -p ronin --release --bin switch_profile -- --seed /tmp/ronin-perf --messages 400
+XDG_CONFIG_HOME=/tmp/ronin-perf/config XDG_DATA_HOME=/tmp/ronin-perf/data \
+  RONIN_PERF_SCENARIO=1 RONIN_PERF_OUT=/tmp/ronin-perf/frames.txt \
+  cargo run -p ronin --release</code></pre>
+<p class="note">Keep the window visible while it runs. Wayland compositors stop sending frames to hidden windows, and the run then records nothing.</p>
+<p><code>switch_profile</code> without <code>--seed</code> still produces the CPU-side switch breakdown from the last pass. Syntax highlighting is the most expensive single step there, at 179 ms for 49 KB of code, and it is now off the UI thread.</p>
+</body>
+</html>

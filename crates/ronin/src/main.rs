@@ -1,11 +1,13 @@
 use std::process::ExitCode;
+use std::rc::Rc;
 
 use gpui::{
-    canvas, deferred, div, ease_out_quint, hsla, img, point, prelude::*, px, size, Animation,
-    AnimationExt, App, Application, Bounds, ClipboardEntry, Context, DragMoveEvent, ExternalPaths,
-    FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, ScrollHandle, SharedString, Subscription, TitlebarOptions, Window,
-    WindowBounds, WindowDecorations, WindowHandle, WindowOptions,
+    canvas, deferred, div, ease_out_quint, hsla, img, list, prelude::*, px, size, Animation,
+    AnimationExt, AnyElement, App, Application, Bounds, ClipboardEntry, Context, DragMoveEvent,
+    ExternalPaths, FocusHandle, FontWeight, KeyDownEvent, ListAlignment, ListOffset, ListState,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollHandle, SharedString,
+    Subscription, TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowHandle,
+    WindowOptions,
 };
 use ronin::{
     acquire_instance,
@@ -268,7 +270,15 @@ pub(crate) fn open_main_window(
                     pending_clipboard_read: None,
                     composer_rem: rem,
                     composer_scroll_handle: ScrollHandle::new(),
-                    message_scroll_handle: ScrollHandle::new(),
+                    message_list: ListState::new(0, ListAlignment::Bottom, px(800.)),
+                    message_rows: Vec::new(),
+                    message_row_ids: Vec::new(),
+                    message_list_thread: None,
+                    message_list_scale: ui_scale,
+                    message_last_assistant: None,
+                    pending_scroll_reveal: None,
+                    message_attachments: std::collections::HashMap::new(),
+                    pending_highlights: std::collections::HashSet::new(),
                     blink_start: std::time::Instant::now(),
                     sidebar_width,
                     sidebar_collapsed,
@@ -310,6 +320,9 @@ pub(crate) fn open_main_window(
                     caret_blink_scheduled: false,
                     stream_pump_scheduled: false,
                     frame_profiler: frame_profile::FrameProfiler::new(),
+                    perf_scenario_started: false,
+                    last_clipboard_poll: std::time::Instant::now(),
+                    window_title: String::new(),
                     sidebar_motion_gen: 0,
                     composer_input_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
                 }
@@ -359,14 +372,27 @@ struct RoninWindow {
     attachment_size_warn: AttachmentSizeWarnState,
     screenshot_capturer: Box<dyn ScreenshotCapturer + Send>,
     desktop_notifier: Box<dyn DesktopNotifier + Send>,
-    parsed_messages: std::collections::HashMap<String, CachedMessageView>,
+    parsed_messages: std::collections::HashMap<String, Rc<CachedMessageView>>,
     completion_index: usize,
     /// When set, hides the `@`/`/` picker until the trigger token changes.
     picker_suppressed: Option<String>,
     pending_clipboard_read: Option<std::sync::mpsc::Receiver<Result<String, arboard::Error>>>,
     composer_rem: f32,
     composer_scroll_handle: ScrollHandle,
-    message_scroll_handle: ScrollHandle,
+    /// Virtualized chat column. Only rows in view (plus overdraw) are built and laid out.
+    message_list: ListState,
+    /// Index into `ShellState::messages` for each list row (system messages are skipped).
+    message_rows: Vec<usize>,
+    message_row_ids: Vec<String>,
+    message_list_thread: Option<String>,
+    message_list_scale: f32,
+    message_last_assistant: Option<String>,
+    /// Search hit to scroll to on the next frame.
+    pending_scroll_reveal: Option<String>,
+    /// Attachments per message, so rows do not query SQLite on every frame.
+    message_attachments: std::collections::HashMap<String, Rc<Vec<ronin_core::Attachment>>>,
+    /// Message ids with a background syntax highlight in flight.
+    pending_highlights: std::collections::HashSet<String>,
     blink_start: std::time::Instant,
     sidebar_width: f32,
     sidebar_collapsed: bool,
@@ -409,13 +435,15 @@ struct RoninWindow {
     caret_blink_scheduled: bool,
     stream_pump_scheduled: bool,
     frame_profiler: frame_profile::FrameProfiler,
+    perf_scenario_started: bool,
+    last_clipboard_poll: std::time::Instant,
+    window_title: String,
     /// Increments on each sidebar toggle so the width animation restarts.
     sidebar_motion_gen: u32,
     /// Last laid-out bounds of the composer text box, in window coordinates.
     composer_input_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
 }
 
-#[derive(Clone)]
 struct CachedMessageView {
     content_len: usize,
     scheme_dark: bool,
@@ -1166,13 +1194,25 @@ impl RoninWindow {
         }
     }
 
-    fn render_message_attachments(&self, message_id: &str, theme: &M0Theme) -> Option<gpui::Div> {
-        let attachments = self.shell.session().list_attachments(message_id).ok()?;
+    fn render_message_attachments(
+        &mut self,
+        message_id: &str,
+        theme: &M0Theme,
+    ) -> Option<gpui::Div> {
+        let attachments = match self.message_attachments.get(message_id) {
+            Some(cached) => cached.clone(),
+            None => {
+                let loaded = Rc::new(self.shell.session().list_attachments(message_id).ok()?);
+                self.message_attachments
+                    .insert(message_id.to_string(), loaded.clone());
+                loaded
+            }
+        };
         if attachments.is_empty() {
             return None;
         }
         let mut row = div().flex().flex_row().flex_wrap().gap_2().mt_2();
-        for attachment in &attachments {
+        for attachment in attachments.iter() {
             let preview = preview_from_attachment(attachment);
             row = row.child(self.render_composer_attachment_preview(&preview, theme));
         }
@@ -2302,6 +2342,7 @@ impl RoninWindow {
                         tracing::error!(%error, "failed to open thread from search");
                     } else {
                         self.pending_scroll_message_id = hit.document.message_id.clone();
+                        self.pending_scroll_reveal = hit.document.message_id.clone();
                         self.keyboard_nav
                             .set_focus(FocusRegion::Messages, self.thread_count());
                         window.focus(&self.messages_focus);
@@ -2653,16 +2694,12 @@ impl RoninWindow {
     }
 
     fn scroll_message_list(&self, direction: ScrollDirection) {
-        let offset = self.message_scroll_handle.offset();
-        let max = self.message_scroll_handle.max_offset();
         let page = px(280.0);
         let delta = match direction {
-            ScrollDirection::Up => page,
-            ScrollDirection::Down => -page,
+            ScrollDirection::Up => -page,
+            ScrollDirection::Down => page,
         };
-        let new_y = (offset.y + delta).clamp(-max.height, px(0.0));
-        self.message_scroll_handle
-            .set_offset(point(offset.x, new_y));
+        self.message_list.scroll_by(delta);
     }
 
     fn thread_count(&self) -> usize {
@@ -2709,19 +2746,163 @@ impl RoninWindow {
         content: &str,
         scheme: ronin_core::ColorScheme,
         highlight: bool,
-    ) -> CachedMessageView {
-        let scheme_dark = matches!(scheme, ronin_core::ColorScheme::Dark);
-        if let Some(hit) = self.parsed_messages.get(id) {
-            if hit.content_len == content.len()
-                && hit.scheme_dark == scheme_dark
-                && (!highlight || hit.highlighted)
-            {
+    ) -> Rc<CachedMessageView> {
+        if self.view_is_cached(id, content.len(), scheme, highlight) {
+            if let Some(hit) = self.parsed_messages.get(id) {
                 return hit.clone();
             }
         }
-        let built = build_message_view(content, scheme, highlight);
+        let built = Rc::new(build_message_view(content, scheme, highlight));
         self.parsed_messages.insert(id.to_string(), built.clone());
         built
+    }
+
+    /// View for a list row. Code that still needs syntect renders plain
+    /// first and picks up colors when the background highlight lands.
+    fn row_message_view(
+        &mut self,
+        message: &ronin_core::Message,
+        scheme: ronin_core::ColorScheme,
+        cx: &mut Context<Self>,
+    ) -> Rc<CachedMessageView> {
+        let highlight = message.status != MessageStatus::Streaming;
+        let len = message.content.len();
+        if !highlight || self.view_is_cached(&message.id, len, scheme, true) {
+            return self.message_view(&message.id, &message.content, scheme, highlight);
+        }
+        let plain = self.message_view(&message.id, &message.content, scheme, false);
+        if plain.code_lines.is_empty() {
+            return plain;
+        }
+        if self.pending_highlights.insert(message.id.clone()) {
+            let id = message.id.clone();
+            let content = message.content.clone();
+            cx.spawn(async move |this, async_cx| {
+                let built = async_cx
+                    .background_executor()
+                    .spawn(async move { build_message_view(&content, scheme, true) })
+                    .await;
+                let _ = this.update(async_cx, |view, cx| {
+                    view.pending_highlights.remove(&id);
+                    let current_len = view
+                        .shell
+                        .state()
+                        .messages
+                        .iter()
+                        .flatten()
+                        .find(|m| m.id == id)
+                        .map(|m| m.content.len());
+                    if current_len == Some(built.content_len) {
+                        view.parsed_messages.insert(id, Rc::new(built));
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        plain
+    }
+
+    fn view_is_cached(
+        &self,
+        id: &str,
+        content_len: usize,
+        scheme: ronin_core::ColorScheme,
+        highlight: bool,
+    ) -> bool {
+        let scheme_dark = matches!(scheme, ronin_core::ColorScheme::Dark);
+        self.parsed_messages.get(id).is_some_and(|hit| {
+            hit.content_len == content_len
+                && hit.scheme_dark == scheme_dark
+                && (!highlight || hit.highlighted)
+        })
+    }
+
+    /// `RONIN_PERF_SCENARIO=1` drives the window through sidebar toggles,
+    /// chat switches, typing, and scrolling, then writes a frame summary to
+    /// `RONIN_PERF_OUT` (or stderr) and quits.
+    fn start_perf_scenario(&mut self, cx: &mut Context<Self>) {
+        if self.perf_scenario_started {
+            return;
+        }
+        self.perf_scenario_started = true;
+        if !std::env::var("RONIN_PERF_SCENARIO").is_ok_and(|value| value != "0") {
+            return;
+        }
+        let out = std::env::var("RONIN_PERF_OUT").ok();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, async_cx| {
+            let pause = |ms: u64| executor.timer(std::time::Duration::from_millis(ms));
+            pause(2000).await;
+            for _ in 0..10 {
+                let _ = this.update(async_cx, |view, cx| {
+                    view.frame_profiler.set_label(Some("sidebar"));
+                    view.toggle_sidebar(cx);
+                });
+                pause(450).await;
+            }
+            let _ = this.update(async_cx, |view, _| view.frame_profiler.set_label(None));
+            pause(300).await;
+            for step in 0..8 {
+                let _ = this.update(async_cx, |view, cx| {
+                    let threads = &view.shell.state().threads;
+                    let Some(id) = threads.get(step % threads.len().min(2)).map(|t| t.id.clone())
+                    else {
+                        return;
+                    };
+                    view.frame_profiler.set_label(Some("switch"));
+                    let _ = view.shell.select_thread(&id);
+                    cx.notify();
+                });
+                pause(450).await;
+            }
+            let _ = this.update(async_cx, |view, _| view.frame_profiler.set_label(None));
+            pause(300).await;
+            for _ in 0..40 {
+                let _ = this.update(async_cx, |view, cx| {
+                    view.frame_profiler.set_label(Some("typing"));
+                    view.composer.insert_str("a");
+                    cx.notify();
+                });
+                pause(40).await;
+            }
+            for _ in 0..12 {
+                let _ = this.update(async_cx, |view, cx| {
+                    view.frame_profiler.set_label(Some("scroll"));
+                    view.scroll_message_list(ScrollDirection::Up);
+                    cx.notify();
+                });
+                pause(120).await;
+            }
+            pause(300).await;
+            let _ = this.update(async_cx, |view, cx| {
+                view.frame_profiler.set_label(None);
+                let mut summary = frame_profile::summarize_frames(view.frame_profiler.recorded());
+                let top = view.message_list.logical_scroll_top();
+                let viewport = view.message_list.viewport_bounds().size;
+                let highlighted = view.parsed_messages.values().filter(|v| v.highlighted).count();
+                summary.push_str(&format!(
+                    "list: rows {} top row {} offset {:.0} viewport {:.0}x{:.0} | views cached {} highlighted {}\n",
+                    view.message_list.item_count(),
+                    top.item_ix,
+                    f32::from(top.offset_in_item),
+                    f32::from(viewport.width),
+                    f32::from(viewport.height),
+                    view.parsed_messages.len(),
+                    highlighted,
+                ));
+                match out.as_deref() {
+                    Some(path) => {
+                        if let Err(error) = std::fs::write(path, &summary) {
+                            eprintln!("perf scenario: failed to write {path}: {error}");
+                        }
+                    }
+                    None => eprint!("{summary}"),
+                }
+                cx.quit();
+            });
+        })
+        .detach();
     }
 
     fn schedule_caret_blink(&mut self, cx: &mut Context<Self>) {
@@ -3419,566 +3600,116 @@ impl RoninWindow {
         column.into_any_element()
     }
 
+    /// Keeps `message_list` row count and cached heights in step with the
+    /// selected thread. Rows after the first changed id are re-measured.
+    fn sync_message_list(&mut self) {
+        let state = self.shell.state();
+        let Some(messages) = state.messages.as_ref() else {
+            return;
+        };
+        let mut rows = Vec::with_capacity(messages.len());
+        let mut last_assistant = None;
+        for (index, message) in messages.iter().enumerate() {
+            if message.role != MessageRole::System {
+                rows.push(index);
+            }
+            if message.role == MessageRole::Assistant {
+                last_assistant = Some(index);
+            }
+        }
+        if self.message_last_assistant.as_deref()
+            != last_assistant.map(|index| messages[index].id.as_str())
+        {
+            self.message_last_assistant = last_assistant.map(|index| messages[index].id.clone());
+        }
+
+        let same_list = state.selected_thread_id == self.message_list_thread
+            && self.message_list_scale == self.ui_scale;
+        let unchanged_prefix = if same_list {
+            self.message_row_ids
+                .iter()
+                .zip(rows.iter().map(|&index| &messages[index].id))
+                .take_while(|(old, new)| old == new)
+                .count()
+        } else {
+            0
+        };
+        if same_list
+            && unchanged_prefix == self.message_row_ids.len()
+            && unchanged_prefix == rows.len()
+        {
+            self.message_rows = rows;
+            return;
+        }
+        if same_list {
+            self.message_list.splice(
+                unchanged_prefix..self.message_row_ids.len(),
+                rows.len() - unchanged_prefix,
+            );
+        } else {
+            self.message_list.reset(rows.len());
+            self.message_attachments.clear();
+            self.message_list_thread = state.selected_thread_id.clone();
+            self.message_list_scale = self.ui_scale;
+        }
+        self.message_row_ids = rows
+            .iter()
+            .map(|&index| messages[index].id.clone())
+            .collect();
+        self.message_rows = rows;
+    }
+
     fn render_messages(
         &mut self,
         theme: &M0Theme,
         messages_focused: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let Some(messages) = self
+    ) -> AnyElement {
+        let has_messages = self
             .shell
             .state()
             .messages
-            .clone()
-            .filter(|msgs| !msgs.is_empty())
-        else {
-            return div().flex_1().p_6().id("empty-messages").child(
-                div()
-                    .child(self.render_empty_state(empty_state(EmptyStateKind::EmptyThread), theme))
-                    .with_animation(
-                        "empty-thread-in",
-                        Animation::new(std::time::Duration::from_millis(280))
-                            .with_easing(ease_out_quint()),
-                        |el, delta| el.opacity(0.35 + 0.65 * delta),
-                    ),
-            );
-        };
+            .as_ref()
+            .is_some_and(|messages| !messages.is_empty());
+        if !has_messages {
+            return div()
+                .flex_1()
+                .p_6()
+                .id("empty-messages")
+                .child(
+                    div()
+                        .child(
+                            self.render_empty_state(
+                                empty_state(EmptyStateKind::EmptyThread),
+                                theme,
+                            ),
+                        )
+                        .with_animation(
+                            "empty-thread-in",
+                            Animation::new(std::time::Duration::from_millis(280))
+                                .with_easing(ease_out_quint()),
+                            |el, delta| el.opacity(0.35 + 0.65 * delta),
+                        ),
+                )
+                .into_any_element();
+        }
 
-        let is_generating = self.shell.is_generation_active();
-        let last_assistant_id = messages
-            .iter()
-            .rev()
-            .find(|m| m.role == MessageRole::Assistant)
-            .map(|m| m.id.clone());
-        let scroll_target = self.pending_scroll_message_id.clone();
-        let visible_ids: Vec<String> = messages
-            .iter()
-            .filter(|m| m.role != MessageRole::System)
-            .map(|m| m.id.clone())
-            .collect();
-        if let Some(target) = scroll_target.as_ref() {
-            if let Some(idx) = visible_ids.iter().position(|id| id == target) {
-                let max = self.message_scroll_handle.max_offset();
-                if max.height > px(0.0) {
-                    let frac = idx as f32 / visible_ids.len().max(1) as f32;
-                    let new_y = (-max.height * frac).clamp(-max.height, px(0.0));
-                    self.message_scroll_handle.set_offset(point(px(0.0), new_y));
-                }
+        self.sync_message_list();
+        if let Some(target) = self.pending_scroll_reveal.take() {
+            if let Some(item_ix) = self.message_row_ids.iter().position(|id| *id == target) {
+                self.message_list.scroll_to(ListOffset {
+                    item_ix,
+                    offset_in_item: px(0.),
+                });
             }
         }
 
-        let message_elements: Vec<_> = messages
-            .into_iter()
-            .filter_map(|msg| {
-                if msg.role == MessageRole::System {
-                    return None;
-                }
-                let (label, bg) = match msg.role {
-                    MessageRole::User => ("You", theme.surface_muted),
-                    MessageRole::Assistant => ("Assistant", theme.surface_selected),
-                    MessageRole::System => unreachable!(),
-                };
-                let is_search_match = scroll_target.as_deref() == Some(msg.id.as_str());
-                let raw_content = msg.content.clone();
-                let is_copied = self.copied_state.as_ref().map(|(id, _)| id) == Some(&msg.id);
-                let editing_this = self
-                    .message_edit
-                    .editing()
-                    .map(|d| d.message_id == msg.id)
-                    .unwrap_or(false);
-                let mut message_body = div().w_full().min_w_0().flex().flex_col().gap_3();
-
-                if !editing_this {
-                    let highlight = msg.status != MessageStatus::Streaming;
-                    let view =
-                        self.message_view(&msg.id, &msg.content, theme.color_scheme, highlight);
-                    let mut code_cursor = 0usize;
-                    let code_lines = view.code_lines;
-                    for (block_idx, block) in view.blocks.into_iter().enumerate() {
-                        let block_el = match block {
-                            ronin::markdown::MarkdownBlock::Paragraph(inlines) => {
-                                ronin::markdown_view::render_inline_flow(&inlines, theme)
-                            }
-                            ronin::markdown::MarkdownBlock::Heading { level, inlines } => {
-                                ronin::markdown_view::render_heading(level, &inlines, theme)
-                            }
-                            ronin::markdown::MarkdownBlock::CodeBlock { language, content } => {
-                                let lang_label = language
-                                    .clone()
-                                    .filter(|l| !l.is_empty())
-                                    .unwrap_or_else(|| "text".to_string());
-                                let prepared =
-                                    code_lines.get(code_cursor).cloned().unwrap_or_default();
-                                code_cursor += 1;
-                                let code_lines = ronin::markdown_view::render_code_lines(&prepared)
-                                    .id(gpui::SharedString::from(format!(
-                                        "{}-code-scroll-{}",
-                                        msg.id, block_idx
-                                    )))
-                                    .overflow_x_scroll();
-                                let block_id = format!("{}-code-{}", msg.id, block_idx);
-                                let is_block_copied =
-                                    self.copied_state.as_ref().map(|(id, _)| id) == Some(&block_id);
-                                let block_copy_text =
-                                    if is_block_copied { "Copied!" } else { "Copy" };
-                                let code_content = content.clone();
-                                let code_language = language.clone();
-                                let save_thread_id = msg.thread_id.clone();
-                                let save_message_id = msg.id.clone();
-                                let header = div()
-                                    .w_full()
-                                    .flex()
-                                    .flex_row()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(theme.text_muted)
-                                            .child(lang_label),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_row()
-                                            .gap_3()
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme.accent)
-                                                    .cursor_pointer()
-                                                    .child(save_code_block_as_snippet_label())
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener({
-                                                            let save_thread_id =
-                                                                save_thread_id.clone();
-                                                            let save_message_id =
-                                                                save_message_id.clone();
-                                                            let code_content = code_content.clone();
-                                                            let code_language =
-                                                                code_language.clone();
-                                                            move |this, _, _, cx| {
-                                                                this.save_code_block_as_snippet(
-                                                                    save_thread_id.clone(),
-                                                                    save_message_id.clone(),
-                                                                    code_language.clone(),
-                                                                    code_content.clone(),
-                                                                    cx,
-                                                                );
-                                                            }
-                                                        }),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(if is_block_copied {
-                                                        theme.text_primary
-                                                    } else {
-                                                        theme.accent
-                                                    })
-                                                    .cursor_pointer()
-                                                    .child(block_copy_text)
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        cx.listener({
-                                                            let block_id = block_id.clone();
-                                                            let code_content = code_content.clone();
-                                                            move |this, _, _, cx| {
-                                                                this.copy_to_clipboard(
-                                                                    block_id.clone(),
-                                                                    code_content.clone(),
-                                                                    cx,
-                                                                );
-                                                            }
-                                                        }),
-                                                    ),
-                                            ),
-                                    );
-                                div()
-                                    .w_full()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .bg(theme.surface_hover)
-                                    .rounded_md()
-                                    .p_3()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .shadow(
-                                        elevation_style(Elevation::Low, theme.color_scheme)
-                                            .box_shadows(),
-                                    )
-                                    .child(header)
-                                    .child(code_lines)
-                            }
-                            ronin::markdown::MarkdownBlock::List(items) => {
-                                let mut list_div =
-                                    div().w_full().min_w_0().flex().flex_col().gap_1().pl_4();
-                                for item in items {
-                                    let li_content = ronin::markdown_view::render_inline_flow(
-                                        &item.inlines,
-                                        theme,
-                                    );
-                                    list_div = list_div.child(
-                                        div()
-                                            .w_full()
-                                            .min_w_0()
-                                            .flex()
-                                            .flex_row()
-                                            .gap_2()
-                                            .child(div().flex_shrink_0().child("•"))
-                                            .child(div().flex_1().min_w_0().child(li_content)),
-                                    );
-                                }
-                                list_div
-                            }
-                        };
-                        message_body = message_body.child(block_el);
-                    }
-
-                    if let Some(attachments_row) = self.render_message_attachments(&msg.id, theme) {
-                        message_body = message_body.child(attachments_row);
-                    }
-                } // !editing_this
-
-                let is_last_assistant = Some(&msg.id) == last_assistant_id.as_ref();
-                let is_assistant = msg.role == MessageRole::Assistant;
-                let is_failed = msg.status == ronin_core::MessageStatus::Failed
-                    || msg.status == ronin_core::MessageStatus::Error;
-                let can_edit = msg.role == MessageRole::User && !editing_this && !is_generating;
-                let overflow_open = matches!(
-                    &self.chrome_menu,
-                    Some(ChromeMenu::Message { id, .. }) if *id == msg.id
-                );
-                let mut message_actions = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("copy-{}", msg.id)))
-                            .size(px(24.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme.surface_hover))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener({
-                                    let msg_id = msg.id.clone();
-                                    let raw_content = raw_content.clone();
-                                    move |this, _, _, cx| {
-                                        this.copy_to_clipboard(
-                                            msg_id.clone(),
-                                            raw_content.clone(),
-                                            cx,
-                                        );
-                                    }
-                                }),
-                            )
-                            .child(icon(
-                                if is_copied {
-                                    IconName::Check
-                                } else {
-                                    IconName::Copy
-                                },
-                                if is_copied {
-                                    theme.text_primary
-                                } else {
-                                    theme.text_muted
-                                },
-                                14.0,
-                            )),
-                    )
-                    .child(
-                        div()
-                            .relative()
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("msg-more-{}", msg.id)))
-                                    .size(px(24.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(theme.surface_hover))
-                                    .on_mouse_down(MouseButton::Left, {
-                                        let id = msg.id.clone();
-                                        let thread_id = msg.thread_id.clone();
-                                        let content = raw_content.clone();
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.chrome_menu = Some(ChromeMenu::Message {
-                                                id: id.clone(),
-                                                thread_id: thread_id.clone(),
-                                                content: content.clone(),
-                                                is_assistant,
-                                                is_failed,
-                                                is_last_assistant,
-                                                can_edit,
-                                            });
-                                            cx.notify();
-                                        })
-                                    })
-                                    .child(icon(IconName::Ellipsis, theme.text_muted, 14.0)),
-                            )
-                            .when(overflow_open, |el| {
-                                el.child(self.render_message_overflow(
-                                    theme,
-                                    is_assistant,
-                                    is_failed,
-                                    is_last_assistant,
-                                    can_edit,
-                                    cx,
-                                ))
-                            }),
-                    );
-
-                if msg.role == MessageRole::User {
-                    if editing_this {
-                        if let Some(editor) = self.message_edit_editor.as_mut() {
-                            editor.set_container_width(560.0);
-                            message_body = message_body.child(
-                                div()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(theme.accent)
-                                    .bg(theme.composer_background)
-                                    .p_2()
-                                    .track_focus(&self.message_edit_focus)
-                                    .on_key_down(cx.listener(
-                                        |this, event: &KeyDownEvent, _, cx| {
-                                            if event.keystroke.key.as_str() == "enter"
-                                                && event.keystroke.modifiers.control
-                                            {
-                                                this.commit_message_edit(cx);
-                                                return;
-                                            }
-                                            if event.keystroke.key.as_str() == "escape" {
-                                                this.cancel_message_edit(cx);
-                                                return;
-                                            }
-                                            if let Some(ed) = this.message_edit_editor.as_mut() {
-                                                if ed.on_key_down(event) {
-                                                    this.message_edit
-                                                        .update_draft(ed.text().to_string());
-                                                    cx.notify();
-                                                }
-                                            }
-                                        },
-                                    ))
-                                    .child(editor.render_text_with_selection(
-                                        "Edit message",
-                                        theme.text_primary,
-                                        theme.text_muted,
-                                        theme.accent,
-                                        theme.surface_selected,
-                                    )),
-                            );
-                            message_actions = message_actions
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.accent)
-                                        .cursor_pointer()
-                                        .child("Save & regenerate")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _, cx| {
-                                                this.commit_message_edit(cx);
-                                            }),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_muted)
-                                        .cursor_pointer()
-                                        .child("Cancel")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _, cx| {
-                                                this.cancel_message_edit(cx);
-                                            }),
-                                        ),
-                                );
-                        }
-                    }
-                }
-
-                if let Ok(siblings) = self.shell.branch_siblings(&msg.thread_id, &msg.id) {
-                    if siblings.len() >= 2 {
-                        if let Some(idx) = siblings.iter().position(|s| s.id == msg.id) {
-                            let prev_id = if idx > 0 {
-                                Some(siblings[idx - 1].id.clone())
-                            } else {
-                                None
-                            };
-                            let next_id = siblings.get(idx + 1).map(|s| s.id.clone());
-                            let thread_id = msg.thread_id.clone();
-                            message_actions = message_actions
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.text_muted)
-                                        .child(branch_nav_label(idx, siblings.len())),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(if prev_id.is_some() {
-                                            theme.accent
-                                        } else {
-                                            theme.text_muted
-                                        })
-                                        .cursor_pointer()
-                                        .child(icon(
-                                            IconName::ChevronLeft,
-                                            if prev_id.is_some() {
-                                                theme.accent
-                                            } else {
-                                                theme.text_muted
-                                            },
-                                            14.0,
-                                        ))
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener({
-                                                let thread_id = thread_id.clone();
-                                                move |this, _, _, cx| {
-                                                    if let Some(id) = prev_id.clone() {
-                                                        this.switch_to_branch(&thread_id, &id, cx);
-                                                    }
-                                                }
-                                            }),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(if next_id.is_some() {
-                                            theme.accent
-                                        } else {
-                                            theme.text_muted
-                                        })
-                                        .cursor_pointer()
-                                        .child(icon(
-                                            IconName::ChevronRight,
-                                            if next_id.is_some() {
-                                                theme.accent
-                                            } else {
-                                                theme.text_muted
-                                            },
-                                            14.0,
-                                        ))
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener({
-                                                let thread_id = thread_id.clone();
-                                                move |this, _, _, cx| {
-                                                    if let Some(id) = next_id.clone() {
-                                                        this.switch_to_branch(&thread_id, &id, cx);
-                                                    }
-                                                }
-                                            }),
-                                        ),
-                                );
-                        }
-                    }
-                }
-
-                if msg.role == MessageRole::Assistant
-                    && (msg.status == ronin_core::MessageStatus::Failed
-                        || msg.status == ronin_core::MessageStatus::Error)
-                {
-                    let detail = msg
-                        .error_message
-                        .clone()
-                        .unwrap_or_else(|| "The response stream was interrupted.".to_string());
-                    let err = error_presentation(ErrorKind::StreamFailure, &detail);
-                    message_body = message_body.child(self.render_error_presentation(&err, theme));
-                    message_actions = message_actions.child(
-                        div()
-                            .id(SharedString::from(format!("retry-{}", msg.id)))
-                            .size(px(24.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(theme.surface_hover))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener({
-                                    let msg_id = msg.id.clone();
-                                    move |this, _, _, cx| {
-                                        if !this.shell.is_generation_active() {
-                                            this.retry_failed_message(msg_id.clone(), cx);
-                                        }
-                                    }
-                                }),
-                            )
-                            .child(icon(
-                                IconName::Refresh,
-                                if is_generating {
-                                    theme.text_muted
-                                } else {
-                                    theme.accent
-                                },
-                                14.0,
-                            )),
-                    );
-                }
-
-                Some(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .mb_4()
-                        .child(
-                            div()
-                                .w_full()
-                                .flex()
-                                .flex_row()
-                                .justify_between()
-                                .mb_1()
-                                .child(div().text_xs().text_color(theme.text_muted).child(label))
-                                .child(message_actions),
-                        )
-                        .child({
-                            let mut bubble = div()
-                                .w_full()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .rounded_lg()
-                                .px_4()
-                                .py_3()
-                                .bg(bg)
-                                .text_color(theme.text_primary);
-                            if is_search_match {
-                                bubble = bubble.border_2().border_color(theme.accent);
-                            }
-                            bubble.child(message_body)
-                        }),
-                )
-            })
-            .collect();
-
-        let mut container = div()
+        let mut column = div()
             .flex_1()
-            .p_6()
+            .min_h_0()
             .flex()
             .flex_col()
-            .gap_2()
             .id("message-scroll")
-            .overflow_y_scroll()
-            .track_scroll(&self.message_scroll_handle)
             .track_focus(&self.messages_focus)
             .border_l_2()
             .border_color(if messages_focused {
@@ -3995,21 +3726,536 @@ impl RoninWindow {
                     window.focus(&this.messages_focus);
                     cx.notify();
                 }),
+            )
+            .child(
+                list(
+                    self.message_list.clone(),
+                    cx.processor(|this, ix: usize, window, cx| {
+                        this.render_message_row(ix, window, cx)
+                    }),
+                )
+                .size_full(),
             );
-        for el in message_elements {
-            container = container.child(el);
-        }
-        if is_generating {
+        if self.shell.is_generation_active() {
             let motion = streaming_motion();
             let elapsed = self.blink_start.elapsed().as_millis() as u64;
-            container = container.child(
+            column = column.child(
                 div()
+                    .px_6()
+                    .pb_2()
                     .text_xs()
                     .text_color(theme.text_muted)
                     .child(generating_label(elapsed, &motion)),
             );
         }
-        container
+        column.into_any_element()
+    }
+
+    fn render_message_row(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(msg) = self.message_rows.get(ix).and_then(|&index| {
+            self.shell
+                .state()
+                .messages
+                .as_ref()
+                .and_then(|messages| messages.get(index))
+                .cloned()
+        }) else {
+            return div().into_any_element();
+        };
+        self.frame_profiler.count_row();
+        let theme = &resolve_shell_theme(self.theme_preference, window.appearance());
+        let is_generating = self.shell.is_generation_active();
+        let last_assistant_id = self.message_last_assistant.clone();
+        let (label, bg) = match msg.role {
+            MessageRole::User => ("You", theme.surface_muted),
+            _ => ("Assistant", theme.surface_selected),
+        };
+        {
+            let is_search_match =
+                self.pending_scroll_message_id.as_deref() == Some(msg.id.as_str());
+            let raw_content = msg.content.clone();
+            let is_copied = self.copied_state.as_ref().map(|(id, _)| id) == Some(&msg.id);
+            let editing_this = self
+                .message_edit
+                .editing()
+                .map(|d| d.message_id == msg.id)
+                .unwrap_or(false);
+            let mut message_body = div().w_full().min_w_0().flex().flex_col().gap_3();
+
+            if !editing_this {
+                let view = self.row_message_view(&msg, theme.color_scheme, cx);
+                let mut code_cursor = 0usize;
+                let code_lines = &view.code_lines;
+                for (block_idx, block) in view.blocks.iter().enumerate() {
+                    let block_el = match block {
+                        ronin::markdown::MarkdownBlock::Paragraph(inlines) => {
+                            ronin::markdown_view::render_inline_flow(inlines, theme)
+                        }
+                        ronin::markdown::MarkdownBlock::Heading { level, inlines } => {
+                            ronin::markdown_view::render_heading(*level, inlines, theme)
+                        }
+                        ronin::markdown::MarkdownBlock::CodeBlock { language, content } => {
+                            let lang_label = language
+                                .clone()
+                                .filter(|l| !l.is_empty())
+                                .unwrap_or_else(|| "text".to_string());
+                            let prepared = code_lines
+                                .get(code_cursor)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]);
+                            code_cursor += 1;
+                            let code_lines = ronin::markdown_view::render_code_lines(prepared)
+                                .id(gpui::SharedString::from(format!(
+                                    "{}-code-scroll-{}",
+                                    msg.id, block_idx
+                                )))
+                                .overflow_x_scroll();
+                            let block_id = format!("{}-code-{}", msg.id, block_idx);
+                            let is_block_copied =
+                                self.copied_state.as_ref().map(|(id, _)| id) == Some(&block_id);
+                            let block_copy_text = if is_block_copied { "Copied!" } else { "Copy" };
+                            let code_content = content.clone();
+                            let code_language = language.clone();
+                            let save_thread_id = msg.thread_id.clone();
+                            let save_message_id = msg.id.clone();
+                            let header = div()
+                                .w_full()
+                                .flex()
+                                .flex_row()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.text_muted)
+                                        .child(lang_label),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(theme.accent)
+                                                .cursor_pointer()
+                                                .child(save_code_block_as_snippet_label())
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener({
+                                                        let save_thread_id = save_thread_id.clone();
+                                                        let save_message_id =
+                                                            save_message_id.clone();
+                                                        let code_content = code_content.clone();
+                                                        let code_language = code_language.clone();
+                                                        move |this, _, _, cx| {
+                                                            this.save_code_block_as_snippet(
+                                                                save_thread_id.clone(),
+                                                                save_message_id.clone(),
+                                                                code_language.clone(),
+                                                                code_content.clone(),
+                                                                cx,
+                                                            );
+                                                        }
+                                                    }),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(if is_block_copied {
+                                                    theme.text_primary
+                                                } else {
+                                                    theme.accent
+                                                })
+                                                .cursor_pointer()
+                                                .child(block_copy_text)
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener({
+                                                        let block_id = block_id.clone();
+                                                        let code_content = code_content.clone();
+                                                        move |this, _, _, cx| {
+                                                            this.copy_to_clipboard(
+                                                                block_id.clone(),
+                                                                code_content.clone(),
+                                                                cx,
+                                                            );
+                                                        }
+                                                    }),
+                                                ),
+                                        ),
+                                );
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .bg(theme.surface_hover)
+                                .rounded_md()
+                                .p_3()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .shadow(
+                                    elevation_style(Elevation::Low, theme.color_scheme)
+                                        .box_shadows(),
+                                )
+                                .child(header)
+                                .child(code_lines)
+                        }
+                        ronin::markdown::MarkdownBlock::List(items) => {
+                            let mut list_div =
+                                div().w_full().min_w_0().flex().flex_col().gap_1().pl_4();
+                            for item in items {
+                                let li_content =
+                                    ronin::markdown_view::render_inline_flow(&item.inlines, theme);
+                                list_div = list_div.child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_row()
+                                        .gap_2()
+                                        .child(div().flex_shrink_0().child("•"))
+                                        .child(div().flex_1().min_w_0().child(li_content)),
+                                );
+                            }
+                            list_div
+                        }
+                    };
+                    message_body = message_body.child(block_el);
+                }
+
+                if let Some(attachments_row) = self.render_message_attachments(&msg.id, theme) {
+                    message_body = message_body.child(attachments_row);
+                }
+            } // !editing_this
+
+            let is_last_assistant = Some(&msg.id) == last_assistant_id.as_ref();
+            let is_assistant = msg.role == MessageRole::Assistant;
+            let is_failed = msg.status == ronin_core::MessageStatus::Failed
+                || msg.status == ronin_core::MessageStatus::Error;
+            let can_edit = msg.role == MessageRole::User && !editing_this && !is_generating;
+            let overflow_open = matches!(
+                &self.chrome_menu,
+                Some(ChromeMenu::Message { id, .. }) if *id == msg.id
+            );
+            let mut message_actions = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("copy-{}", msg.id)))
+                        .size(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.surface_hover))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener({
+                                let msg_id = msg.id.clone();
+                                let raw_content = raw_content.clone();
+                                move |this, _, _, cx| {
+                                    this.copy_to_clipboard(msg_id.clone(), raw_content.clone(), cx);
+                                }
+                            }),
+                        )
+                        .child(icon(
+                            if is_copied {
+                                IconName::Check
+                            } else {
+                                IconName::Copy
+                            },
+                            if is_copied {
+                                theme.text_primary
+                            } else {
+                                theme.text_muted
+                            },
+                            14.0,
+                        )),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("msg-more-{}", msg.id)))
+                                .size(px(24.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.surface_hover))
+                                .on_mouse_down(MouseButton::Left, {
+                                    let id = msg.id.clone();
+                                    let thread_id = msg.thread_id.clone();
+                                    let content = raw_content.clone();
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.chrome_menu = Some(ChromeMenu::Message {
+                                            id: id.clone(),
+                                            thread_id: thread_id.clone(),
+                                            content: content.clone(),
+                                            is_assistant,
+                                            is_failed,
+                                            is_last_assistant,
+                                            can_edit,
+                                        });
+                                        cx.notify();
+                                    })
+                                })
+                                .child(icon(IconName::Ellipsis, theme.text_muted, 14.0)),
+                        )
+                        .when(overflow_open, |el| {
+                            el.child(self.render_message_overflow(
+                                theme,
+                                is_assistant,
+                                is_failed,
+                                is_last_assistant,
+                                can_edit,
+                                cx,
+                            ))
+                        }),
+                );
+
+            if msg.role == MessageRole::User {
+                if editing_this {
+                    if let Some(editor) = self.message_edit_editor.as_mut() {
+                        editor.set_container_width(560.0);
+                        message_body = message_body.child(
+                            div()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme.accent)
+                                .bg(theme.composer_background)
+                                .p_2()
+                                .track_focus(&self.message_edit_focus)
+                                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                                    if event.keystroke.key.as_str() == "enter"
+                                        && event.keystroke.modifiers.control
+                                    {
+                                        this.commit_message_edit(cx);
+                                        return;
+                                    }
+                                    if event.keystroke.key.as_str() == "escape" {
+                                        this.cancel_message_edit(cx);
+                                        return;
+                                    }
+                                    if let Some(ed) = this.message_edit_editor.as_mut() {
+                                        if ed.on_key_down(event) {
+                                            this.message_edit.update_draft(ed.text().to_string());
+                                            cx.notify();
+                                        }
+                                    }
+                                }))
+                                .child(editor.render_text_with_selection(
+                                    "Edit message",
+                                    theme.text_primary,
+                                    theme.text_muted,
+                                    theme.accent,
+                                    theme.surface_selected,
+                                )),
+                        );
+                        message_actions = message_actions
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.accent)
+                                    .cursor_pointer()
+                                    .child("Save & regenerate")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.commit_message_edit(cx);
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.text_muted)
+                                    .cursor_pointer()
+                                    .child("Cancel")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, cx| {
+                                            this.cancel_message_edit(cx);
+                                        }),
+                                    ),
+                            );
+                    }
+                }
+            }
+
+            if let Ok(siblings) = self.shell.branch_siblings(&msg.thread_id, &msg.id) {
+                if siblings.len() >= 2 {
+                    if let Some(idx) = siblings.iter().position(|s| s.id == msg.id) {
+                        let prev_id = if idx > 0 {
+                            Some(siblings[idx - 1].id.clone())
+                        } else {
+                            None
+                        };
+                        let next_id = siblings.get(idx + 1).map(|s| s.id.clone());
+                        let thread_id = msg.thread_id.clone();
+                        message_actions = message_actions
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.text_muted)
+                                    .child(branch_nav_label(idx, siblings.len())),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if prev_id.is_some() {
+                                        theme.accent
+                                    } else {
+                                        theme.text_muted
+                                    })
+                                    .cursor_pointer()
+                                    .child(icon(
+                                        IconName::ChevronLeft,
+                                        if prev_id.is_some() {
+                                            theme.accent
+                                        } else {
+                                            theme.text_muted
+                                        },
+                                        14.0,
+                                    ))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener({
+                                            let thread_id = thread_id.clone();
+                                            move |this, _, _, cx| {
+                                                if let Some(id) = prev_id.clone() {
+                                                    this.switch_to_branch(&thread_id, &id, cx);
+                                                }
+                                            }
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(if next_id.is_some() {
+                                        theme.accent
+                                    } else {
+                                        theme.text_muted
+                                    })
+                                    .cursor_pointer()
+                                    .child(icon(
+                                        IconName::ChevronRight,
+                                        if next_id.is_some() {
+                                            theme.accent
+                                        } else {
+                                            theme.text_muted
+                                        },
+                                        14.0,
+                                    ))
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener({
+                                            let thread_id = thread_id.clone();
+                                            move |this, _, _, cx| {
+                                                if let Some(id) = next_id.clone() {
+                                                    this.switch_to_branch(&thread_id, &id, cx);
+                                                }
+                                            }
+                                        }),
+                                    ),
+                            );
+                    }
+                }
+            }
+
+            if msg.role == MessageRole::Assistant
+                && (msg.status == ronin_core::MessageStatus::Failed
+                    || msg.status == ronin_core::MessageStatus::Error)
+            {
+                let detail = msg
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "The response stream was interrupted.".to_string());
+                let err = error_presentation(ErrorKind::StreamFailure, &detail);
+                message_body = message_body.child(self.render_error_presentation(&err, theme));
+                message_actions = message_actions.child(
+                    div()
+                        .id(SharedString::from(format!("retry-{}", msg.id)))
+                        .size(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.surface_hover))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener({
+                                let msg_id = msg.id.clone();
+                                move |this, _, _, cx| {
+                                    if !this.shell.is_generation_active() {
+                                        this.retry_failed_message(msg_id.clone(), cx);
+                                    }
+                                }
+                            }),
+                        )
+                        .child(icon(
+                            IconName::Refresh,
+                            if is_generating {
+                                theme.text_muted
+                            } else {
+                                theme.accent
+                            },
+                            14.0,
+                        )),
+                );
+            }
+
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .px_6()
+                .pb_6()
+                .when(ix == 0, |el| el.pt_6())
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .justify_between()
+                        .mb_1()
+                        .child(div().text_xs().text_color(theme.text_muted).child(label))
+                        .child(message_actions),
+                )
+                .child({
+                    let mut bubble = div()
+                        .w_full()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .rounded_lg()
+                        .px_4()
+                        .py_3()
+                        .bg(bg)
+                        .text_color(theme.text_primary);
+                    if is_search_match {
+                        bubble = bubble.border_2().border_color(theme.accent);
+                    }
+                    bubble.child(message_body)
+                })
+                .into_any_element()
+        }
     }
 
     fn render_composer(
@@ -6082,7 +6328,12 @@ impl Render for RoninWindow {
         }
 
         // Opt-in clipboard watch → confirm-to-attach (never auto-attaches).
-        if self.shell.clipboard_watch_enabled() {
+        // Reading the clipboard is a round trip to the display server, so
+        // animation frames must not each pay for it.
+        if self.shell.clipboard_watch_enabled()
+            && self.last_clipboard_poll.elapsed() >= std::time::Duration::from_millis(500)
+        {
+            self.last_clipboard_poll = std::time::Instant::now();
             use ronin_core::ClipboardObserveOutcome;
             match self
                 .shell
@@ -6120,7 +6371,10 @@ impl Render for RoninWindow {
         let titlebar_title = Self::current_thread_title(self.shell.state())
             .map(|t| t.to_string())
             .unwrap_or_else(|| "New Chat".to_string());
-        window.set_window_title(&titlebar_title);
+        if self.window_title != titlebar_title {
+            window.set_window_title(&titlebar_title);
+            self.window_title.clone_from(&titlebar_title);
+        }
         if self.companion_mood != CompanionMood::Idle
             && self.companion_mood_at.elapsed() > reaction_hold()
         {
@@ -6269,7 +6523,8 @@ impl Render for RoninWindow {
                     )),
             );
         }
-        ui
+        self.start_perf_scenario(cx);
+        ui.child(self.frame_profiler.probe())
     }
 }
 

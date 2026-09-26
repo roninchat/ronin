@@ -22,6 +22,7 @@ context
 
 # Ronin local runtime data
 .ronin/
+.perf/
 *.db
 *.db-shm
 *.db-wal

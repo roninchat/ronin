@@ -17,7 +17,7 @@ pub use workspace_index::{
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use time::OffsetDateTime;
 use tracing::{debug, info};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -675,6 +675,20 @@ impl RoninDb {
             .map_err(RoninDbError::ReadThreads)?;
 
         Ok(threads)
+    }
+
+    /// Active branch tip for one thread, without loading the rest of the sidebar.
+    pub fn thread_active_leaf(&self, thread_id: &str) -> Result<Option<String>> {
+        let leaf = self
+            .conn
+            .query_row(
+                "SELECT active_leaf_id FROM threads WHERE id = ?1",
+                params![thread_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(RoninDbError::QueryThreads)?;
+        Ok(leaf.flatten())
     }
 
     /// Sets the active conversation leaf for a thread.
