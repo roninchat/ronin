@@ -25,3 +25,10 @@ uuid = { version = "1.10", features = ["v7"] }
 [profile.dev]
 debug = 1
 incremental = true
+
+# GPUI layout, text shaping, and syntect run far too slowly at opt-level 0.
+# Unoptimized, a sidebar slide in a long chat drops to a few frames a second.
+# Workspace crates stay unoptimized so they remain quick to rebuild and debug.
+[profile.dev.package."*"]
+opt-level = 3
+debug = false

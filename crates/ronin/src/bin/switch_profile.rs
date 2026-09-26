@@ -56,9 +56,8 @@ fn main() -> ExitCode {
         return match seed(&dir, seed_messages) {
             Ok(()) => {
                 println!(
-                    "seeded {} with a {seed_messages}-message chat and a {}-message chat",
-                    dir.display(),
-                    seed_messages / 2
+                    "seeded {} with two {seed_messages}-message chats",
+                    dir.display()
                 );
                 ExitCode::SUCCESS
             }
@@ -95,7 +94,7 @@ fn seed(dir: &std::path::Path, messages: usize) -> Result<(), String> {
         data_dir: dir.join("data/ronin"),
     })
     .map_err(|error| error.to_string())?;
-    for (index, count) in [messages, messages / 2].into_iter().enumerate() {
+    for (index, count) in [messages, messages].into_iter().enumerate() {
         let thread = session.create_thread().map_err(|error| error.to_string())?;
         session
             .update_thread_title(&thread.id, &format!("Long chat {}", index + 1))

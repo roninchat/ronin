@@ -55,6 +55,15 @@
   <li><strong>Per-frame work in <code>render</code>.</strong> With clipboard watch on, every frame read the system clipboard. That now happens at most every 500 ms. The window title was sent to the compositor on every frame, and now only when it changes.</li>
 </ul>
 
+<h2>Dev builds</h2>
+<p><code>cargo run</code> used to build GPUI, its text shaping, and syntect without optimization. Even with only three rows built per frame, re-wrapping their text took hundreds of milliseconds. <code>[profile.dev.package."*"]</code> now builds dependencies at <code>opt-level = 3</code>, while the workspace crates stay unoptimized for fast rebuilds. The table below is the dev build with two 100-message chats.</p>
+<table>
+  <tr><th>Scenario</th><th class="num">Dev before, p95</th><th class="num">Dev after, p95</th><th class="num">Frames before</th><th class="num">Frames after</th></tr>
+  <tr><td>Sidebar collapse and expand</td><td class="num">376.1 ms</td><td class="num">13.1 ms</td><td class="num">30</td><td class="num">118</td></tr>
+  <tr><td>Switching between two long chats</td><td class="num">250.1 ms</td><td class="num">11.4 ms</td><td class="num">17</td><td class="num">45</td></tr>
+  <tr><td>Typing</td><td class="num">21.8 ms</td><td class="num">6.9 ms</td><td class="num">40</td><td class="num">56</td></tr>
+</table>
+
 <h2>The tools</h2>
 <p><code>RONIN_FPS=1</code> still shows the overlay. The frame profiler now also measures GPUI layout and paint, via a zero-size probe element at the end of the tree. Before, it only timed element construction, which is why the earlier pass missed this.</p>
 <p><code>RONIN_PERF_SCENARIO=1</code> drives the window through ten sidebar toggles, eight chat switches, typing, and scrolling. It then writes p50, p95, and max frame times, the render, layout, and paint split, and rows built per frame to <code>RONIN_PERF_OUT</code>, and quits.</p>
