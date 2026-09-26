@@ -209,6 +209,7 @@ pub(crate) fn open_main_window(
             }),
             window_min_size: Some(size(px(WINDOW_MIN_WIDTH), px(WINDOW_MIN_HEIGHT))),
             window_decorations: Some(WindowDecorations::Client),
+            app_id: Some(ronin::APP_ID.to_string()),
             ..Default::default()
         },
         |window, cx| {

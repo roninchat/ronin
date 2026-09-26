@@ -2,6 +2,10 @@
 
 //! Native Ronin launcher support.
 
+/// Wayland app id and X11 WM class. Must match the installed `ronin.desktop`
+/// so the dock groups Ronin windows under its launcher.
+pub const APP_ID: &str = "ronin";
+
 /// Markdown parsing and AST for GPUI rendering.
 pub mod markdown;
 

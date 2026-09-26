@@ -41,6 +41,7 @@ pub fn open_quick_overlay_window(
                 title: Some(SharedString::from(quick_overlay_title())),
                 ..Default::default()
             }),
+            app_id: Some(ronin::APP_ID.to_string()),
             ..Default::default()
         },
         |window, cx| {
