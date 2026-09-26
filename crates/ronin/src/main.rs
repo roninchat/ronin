@@ -2144,6 +2144,7 @@ impl RoninWindow {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     fn create_new_thread(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         match self.shell.create_new_thread() {
             Ok(_) => {
@@ -3574,6 +3575,7 @@ impl RoninWindow {
         }
     }
 
+    #[allow(dead_code)]
     fn render_provider_status(
         &self,
         state: &ShellState,

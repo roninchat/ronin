@@ -199,6 +199,7 @@ impl RoninWindow {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub(crate) fn dismiss_chrome_overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut changed = false;
         if self.command_palette.is_open() {

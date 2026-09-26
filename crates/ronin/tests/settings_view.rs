@@ -1,9 +1,10 @@
 //! Settings overlay section filter and field labels.
 
 use ronin::settings_view::{
-    artifacts_toggle_label, auto_title_toggle_label, memories_toggle_label,
-    notifications_toggle_label, scale_label, section_label, shortcut_hints_toggle_label,
-    theme_label, visible_sections, SettingsSection, SettingsState,
+    archive_instead_of_delete_toggle_label, artifacts_toggle_label, auto_title_toggle_label,
+    memories_toggle_label, notifications_toggle_label, scale_label, search_archived_toggle_label,
+    section_label, shortcut_hints_toggle_label, theme_label, visible_sections, SettingsSection,
+    SettingsState,
 };
 
 #[test]
@@ -49,6 +50,8 @@ fn section_and_field_labels_should_be_non_empty() {
     assert!(!shortcut_hints_toggle_label().is_empty());
     assert!(!notifications_toggle_label().is_empty());
     assert!(!auto_title_toggle_label().is_empty());
+    assert!(!archive_instead_of_delete_toggle_label().is_empty());
+    assert!(!search_archived_toggle_label().is_empty());
     assert!(!theme_label().is_empty());
     assert!(!scale_label().is_empty());
 }

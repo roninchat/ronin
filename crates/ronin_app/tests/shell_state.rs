@@ -438,6 +438,18 @@ fn shell_should_store_connection_test_result_on_state() {
 
 #[test]
 fn shell_should_refresh_provider_status_based_on_thread_settings() {
+    let prev_key = std::env::var("OPENAI_API_KEY").ok();
+    std::env::remove_var("OPENAI_API_KEY");
+    struct EnvGuard(Option<String>);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(ref val) = self.0 {
+                std::env::set_var("OPENAI_API_KEY", val);
+            }
+        }
+    }
+    let _guard = EnvGuard(prev_key);
+
     let temp = TempDir::new().expect("temp dir");
     let paths = RoninPaths {
         config_dir: temp.path().join("config"),
