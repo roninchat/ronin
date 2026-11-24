@@ -1,5 +1,7 @@
 //! Composer editor state, input handling, and rendering for Ronin GPUI shell.
 
+use std::cell::RefCell;
+
 use gpui::prelude::*;
 use gpui::{div, px, rgb, IntoElement, KeyDownEvent};
 
@@ -16,6 +18,8 @@ pub struct ComposerEditor {
     container_width: f32,
     /// Whether the text cursor is currently visible (for blinking).
     pub cursor_visible: bool,
+    /// Memoised `visual_lines()` result; cleared whenever text or layout metrics change.
+    visual_lines_cache: RefCell<Option<Vec<(usize, usize)>>>,
 }
 
 impl Default for ComposerEditor {
@@ -37,6 +41,7 @@ impl ComposerEditor {
             line_height: 18.0,
             container_width: 400.0,
             cursor_visible: true,
+            visual_lines_cache: RefCell::new(None),
         }
     }
 
@@ -49,11 +54,16 @@ impl ComposerEditor {
     pub fn set_font_metrics_from_rem(&mut self, rem_px: f32) {
         self.char_width = rem_px * 0.52;
         self.line_height = rem_px * 1.45;
+        self.invalidate_visual_lines_cache();
     }
 
     /// Set container pixel width for layout computations.
     pub fn set_container_width(&mut self, width: f32) {
-        self.container_width = width.max(1.0);
+        let next = width.max(1.0);
+        if next != self.container_width {
+            self.container_width = next;
+            self.invalidate_visual_lines_cache();
+        }
     }
 
     // ── text access ──
@@ -67,12 +77,14 @@ impl ComposerEditor {
     pub fn set_text(&mut self, text: String) {
         self.cursor = self.cursor.min(text.len());
         self.text = text;
+        self.invalidate_visual_lines_cache();
     }
 
     /// Takes the text, resetting cursor and selection.
     pub fn take_text(&mut self) -> String {
         self.cursor = 0;
         self.selection = None;
+        self.invalidate_visual_lines_cache();
         std::mem::take(&mut self.text)
     }
 
@@ -89,7 +101,23 @@ impl ComposerEditor {
     // ── visual lines ──
 
     /// Returns visual lines (byte ranges) splitting on explicit `\n` and soft-wrapping.
+    ///
+    /// The result is cached until the text, container width, or font metrics change,
+    /// because render and cursor movement call this many times per frame.
     pub fn visual_lines(&self) -> Vec<(usize, usize)> {
+        if let Some(cached) = self.visual_lines_cache.borrow().as_ref() {
+            return cached.clone();
+        }
+        let lines = self.compute_visual_lines();
+        *self.visual_lines_cache.borrow_mut() = Some(lines.clone());
+        lines
+    }
+
+    fn invalidate_visual_lines_cache(&self) {
+        self.visual_lines_cache.borrow_mut().take();
+    }
+
+    fn compute_visual_lines(&self) -> Vec<(usize, usize)> {
         if self.text.is_empty() {
             return vec![(0, 0)];
         }
@@ -226,6 +254,7 @@ impl ComposerEditor {
         if let Some((start, end)) = self.selection.take() {
             self.text.drain(start..end);
             self.cursor = start;
+            self.invalidate_visual_lines_cache();
         }
     }
 
@@ -235,6 +264,7 @@ impl ComposerEditor {
         self.clamp_cursor();
         let mut buf = [0u8; 4];
         self.text.insert_str(self.cursor, ch.encode_utf8(&mut buf));
+        self.invalidate_visual_lines_cache();
         self.cursor += ch.len_utf8();
     }
 
@@ -243,6 +273,7 @@ impl ComposerEditor {
         self.delete_selection();
         self.clamp_cursor();
         self.text.insert_str(self.cursor, s);
+        self.invalidate_visual_lines_cache();
         self.cursor += s.len();
     }
 
@@ -262,6 +293,7 @@ impl ComposerEditor {
             .map(|(i, _)| i)
             .unwrap_or(0);
         self.text.drain(prev..self.cursor);
+        self.invalidate_visual_lines_cache();
         self.cursor = prev;
     }
 
@@ -281,6 +313,7 @@ impl ComposerEditor {
             .map(|(i, _)| self.cursor + i)
             .unwrap_or(self.text.len());
         self.text.drain(self.cursor..next);
+        self.invalidate_visual_lines_cache();
     }
 
     /// Deletes the word preceding the cursor (or the selection).
@@ -291,6 +324,7 @@ impl ComposerEditor {
         }
         let target = self.prev_word_byte(self.cursor);
         self.text.drain(target..self.cursor);
+        self.invalidate_visual_lines_cache();
         self.cursor = target;
     }
 
@@ -451,6 +485,7 @@ impl ComposerEditor {
     /// Replaces a range of text (used for command completions).
     pub fn replace_range(&mut self, start: usize, end: usize, replacement: &str) {
         self.text.replace_range(start..end, replacement);
+        self.invalidate_visual_lines_cache();
         self.cursor = start + replacement.len();
         self.selection = None;
     }
@@ -793,5 +828,34 @@ impl ComposerEditor {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ComposerEditor;
+
+    #[test]
+    fn visual_lines_cache_tracks_text_and_layout_changes() {
+        let mut editor = ComposerEditor::new();
+        editor.set_container_width(80.0); // 10 chars at the default 8px char width
+        editor.set_text("abcdefghijklmno".into());
+        assert_eq!(editor.visual_lines(), vec![(0, 10), (10, 15)]);
+
+        editor.set_container_width(400.0);
+        assert_eq!(editor.visual_lines(), vec![(0, 15)]);
+
+        editor.click_at_end();
+        editor.insert_str("\nxy");
+        assert_eq!(editor.visual_lines(), vec![(0, 15), (16, 18)]);
+
+        editor.delete_before_cursor();
+        assert_eq!(editor.visual_lines(), vec![(0, 15), (16, 17)]);
+
+        editor.replace_range(0, 15, "a");
+        assert_eq!(editor.visual_lines(), vec![(0, 1), (2, 3)]);
+
+        editor.take_text();
+        assert_eq!(editor.visual_lines(), vec![(0, 0)]);
     }
 }
